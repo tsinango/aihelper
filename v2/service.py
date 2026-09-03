@@ -9,8 +9,6 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from psycopg.types.json import Jsonb
-
 
 class V2NotFound(LookupError):
     """Raised when a requested V2 thread does not exist."""
@@ -60,109 +58,6 @@ def get_thread(conn, thread_id: int) -> dict:
 
 def ensure_thread(conn, thread_id: int | None, *, channel: str = "inbox", mode: str = "learn") -> dict:
     return get_thread(conn, thread_id) if thread_id is not None else create_thread(conn, channel=channel, mode=mode)
-
-
-def add_message(
-    conn,
-    *,
-    thread_id: int,
-    role: str,
-    content: str,
-    message_type: str,
-) -> dict:
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO v2_inbox_messages(thread_id, sequence_no, role, content, message_type)
-            VALUES(
-                %s,
-                (SELECT COALESCE(MAX(sequence_no), 0) + 1
-                 FROM v2_inbox_messages WHERE thread_id=%s),
-                %s, %s, %s
-            )
-            RETURNING id, thread_id, sequence_no, role, content, message_type,
-                      raw_evidence_id, created_at
-            """,
-            (thread_id, thread_id, role, content, message_type),
-        )
-        return _dict(cur.fetchone())
-
-
-def add_raw_evidence(
-    conn,
-    *,
-    evidence_type: str,
-    source_label: str,
-    source_locator: str,
-    content: str,
-    metadata: dict | None = None,
-) -> dict:
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO v2_raw_evidence(
-                evidence_type, author_role, content, raw_payload,
-                source_label, source_locator
-            )
-            VALUES(%s, 'product_expert', %s, %s, %s, %s)
-            RETURNING id, evidence_type, author_role, content, raw_payload,
-                      source_label, source_locator, created_at
-            """,
-            (evidence_type, content, Jsonb(metadata or {}), source_label, source_locator),
-        )
-        return _dict(cur.fetchone())
-
-
-def append_user_message(
-    conn,
-    content: str,
-    *,
-    thread_id: int | None = None,
-    channel: str = "inbox",
-    mode: str = "learn",
-) -> dict:
-    """Persist a user turn and its immutable raw evidence.
-
-    Phase 1 deliberately does not infer or confirm knowledge.  The returned
-    status is only receipt acknowledgement; Phase 2 adds the learning reply.
-    """
-
-    clean = str(content or "").strip()
-    if not clean:
-        raise ValueError("content must not be empty")
-    thread = ensure_thread(conn, thread_id, channel=channel, mode=mode)
-    evidence = add_raw_evidence(
-        conn,
-        evidence_type="user_input",
-        source_label="Inbox",
-        source_locator=f"v2-thread:{thread['id']}",
-        content=clean,
-        metadata={"thread_id": thread["id"], "channel": channel},
-    )
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO v2_inbox_messages(
-                thread_id, sequence_no, role, message_type, content, raw_evidence_id
-            )
-            VALUES(
-                %s,
-                (SELECT COALESCE(MAX(sequence_no), 0) + 1
-                 FROM v2_inbox_messages WHERE thread_id=%s),
-                'user', 'evidence', %s, %s
-            )
-            RETURNING id, thread_id, sequence_no, role, content, message_type,
-                      raw_evidence_id, created_at
-            """,
-            (int(thread["id"]), int(thread["id"]), clean, evidence["id"]),
-        )
-        message = _dict(cur.fetchone())
-    with conn.cursor() as cur:
-        cur.execute(
-            "UPDATE v2_inbox_threads SET updated_at=CURRENT_TIMESTAMP WHERE id=%s",
-            (int(thread["id"]),),
-        )
-    return {"thread": thread, "message": message, "evidence": evidence}
 
 
 def list_thread_messages(conn, thread_id: int) -> list[dict]:

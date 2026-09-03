@@ -95,31 +95,38 @@ V2 不把用户暴露给 `candidate`、`knowledge_key`、`scope`、taxonomy、to
 
 ```sql
 v2_raw_evidence
-  id, source_type, source_ref, content, metadata_json, created_at
+  id, evidence_type, author_role, content, raw_payload, source_label,
+  source_locator, external_id, conversation_id, document_id,
+  document_chunk_id, telegram_chat_id, telegram_message_id,
+  reply_to_telegram_message_id, evidence_status, captured_at, created_at
 
 v2_knowledge
   id, title, content, entity_name, trust, active, created_at, updated_at
 
 v2_knowledge_sources
-  knowledge_id, evidence_id, relation, created_at
+  id, knowledge_id, raw_evidence_id, source_kind, relation, source_role,
+  excerpt, active, resolution, created_at
 
 v2_inbox_threads
-  id, channel, status, mode, created_at, updated_at
+  id, thread_type, origin, status, external_thread_id, created_at, updated_at
 
 v2_inbox_messages
-  id, thread_id, role, content, message_type, created_at
+  id, thread_id, sequence_no, role, message_type, content, raw_evidence_id,
+  message_status, created_at
 
 v2_learning_proposals
-  id, thread_id, message_id, title, content, entity_name, status,
-  skip_reason, evidence_id, knowledge_id, created_at, updated_at
+  id, thread_id, source_message_id, question_message_id, fact_text,
+  entity_name, proposed_trust, status, confirmed_knowledge_id,
+  resolution_message_id, created_at, updated_at
 
 v2_learning_sessions
-  id, thread_id, summary_json, started_at, ended_at
+  id, thread_id, session_type, status, question_budget, questions_asked,
+  summary, started_at, completed_at, created_at, updated_at
 ```
 
 约束：`trust` 只能是 `official_source`、`user_confirmed`、`provisional`、`conflicted`；`active=false` 可让被用户否定的 source/knowledge 退出生产 retrieval，但原始 evidence 和 resolution history 永久保留。`v2_knowledge_sources` 是多来源 provenance，不把来源文本塞进 Knowledge 内容后丢失关系。
 
-`v2_learning_proposals` 不是用户需要维护的 candidate workflow，而是 Inbox 对话中等待原子确认的短暂内部状态。一次只允许一个 active proposal；确认后写入 `v2_knowledge` 和 source relation，跳过则记录并停止机械重复。
+`v2_learning_proposals` 不是用户需要维护的 candidate workflow，而是 Inbox 对话中等待原子确认的短暂内部状态。一次只向用户显示一个 pending proposal；确认后写入 `v2_knowledge` 和 source relation，跳过则记录并停止机械重复。`v2_learning_sessions.question_budget` 保存主动提问预算，默认值通过应用配置传入。
 
 ## Phase 1–2 vertical slice
 
@@ -136,7 +143,7 @@ v2_learning_sessions
 ### Phase 2：最小学习闭环
 
 1. 仅处理手工文字，不处理 PDF、Excel、CSV、Telegram webhook 或历史批处理。
-2. 接收输入并保存 raw evidence + user message；查 active V2 Knowledge 的 entity/exact/full-text evidence。
+2. 接收输入并保存 raw evidence + user message；先按实体和规范化内容查 active V2 Knowledge，避免重复创建。
 3. 若无法理解或发现需要专家判断，OpenRouter 返回一个原子 proposal；UI 一次只显示一个问题。
 4. 用户可以回答、不知道、跳过、以后再说。跳过写入 session/proposal 状态，后续没有新 evidence/context 时不重复问。
 5. AI 将一个事实复述为一个确认问题。只有用户明确确认后才创建或更新 `user_confirmed` Knowledge；随手输入和 AI 推断均为 `provisional`。

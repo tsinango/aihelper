@@ -45,13 +45,13 @@ from logging_security import install_telegram_logging_redaction, register_telegr
 from telegram_relations import classify_message, message_evidence_status, message_id
 from v2.service import (
     V2NotFound,
-    append_user_message,
     inbox_snapshot,
     json_safe,
     list_documents,
     list_knowledge,
     thread_response,
 )
+from v2.learning import learn_turn
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 install_telegram_logging_redaction()
@@ -74,6 +74,7 @@ settings = {
     "telegram_token_file": Path(os.getenv("TELEGRAM_TOKEN_FILE", "tgtoken")),
     "telegram_webhook_secret": os.getenv("TELEGRAM_WEBHOOK_SECRET", ""),
     "review_embedding_provider": os.getenv("REVIEW_EMBEDDING_PROVIDER", "openrouter").strip().casefold(),
+    "v2_passive_question_budget": int(os.getenv("V2_PASSIVE_QUESTION_BUDGET", "5")),
 }
 embedder: OpenRouterEmbeddingClient | None = None
 llm: LLMService | None = None
@@ -1743,22 +1744,15 @@ def v2_inbox_message(payload: V2InboxMessageIn, x_api_key: str | None = Header(N
     auth(x_api_key)
     try:
         with db() as conn:
-            saved = append_user_message(
+            result = learn_turn(
                 conn,
                 payload.content,
                 thread_id=payload.thread_id,
                 channel=payload.channel,
-                mode="learn",
+                llm_service=llm,
+                question_budget=settings["v2_passive_question_budget"],
             )
-            current = thread_response(conn, int(saved["thread"]["id"]))
-            return json_safe({
-                "thread_id": saved["thread"]["id"],
-                "thread": current["thread"],
-                "messages": current["messages"],
-                "message": saved["message"],
-                "evidence": saved["evidence"],
-                "status": "received",
-            })
+            return json_safe(result)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     except V2NotFound as exc:
