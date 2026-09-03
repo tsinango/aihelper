@@ -1,0 +1,33 @@
+notes.813328.xyz {
+    encode zstd gzip
+    reverse_proxy 127.0.0.1:3000
+}
+
+se.813328.xyz {
+    encode zstd gzip
+    handle /telegram/webhook {
+        reverse_proxy 127.0.0.1:8000
+    }
+    respond 404
+}
+
+:80 {
+    encode zstd gzip
+    handle /review* {
+        reverse_proxy 127.0.0.1:8080
+    }
+    handle /api/* {
+        reverse_proxy 127.0.0.1:8080
+    }
+    handle /health {
+        reverse_proxy 127.0.0.1:8080
+    }
+    handle /ready {
+        reverse_proxy 127.0.0.1:8080
+    }
+    handle {
+        root * /var/www/ai-sales-engineer
+        try_files {path} /index.html
+        file_server
+    }
+}

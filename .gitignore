@@ -1,0 +1,23 @@
+.venv/
+__pycache__/
+*.pyc
+
+# Local credentials and environment files
+.env
+.env.*
+openrouter
+tgtoken
+
+# Local archives, exports, runtime output, and knowledge-review data
+temp.7z
+data/
+d1-export/
+TELEGRAM_KNOWLEDGE_REVIEW.md
+KNOWLEDGE_INTENT_REVIEW*.md
+TOPIC_REVIEW*.md
+VERIFIED_KNOWLEDGE*.md
+*.log
+
+# Local database/cache artifacts
+*.sqlite
+*.sqlite3

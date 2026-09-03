@@ -1,0 +1,6 @@
+fastapi>=0.116,<1
+httpx>=0.27,<1
+openai>=1.99,<2
+psycopg[binary]>=3.2,<4
+python-multipart>=0.0.20,<1
+uvicorn[standard]>=0.35,<1
