@@ -43,6 +43,15 @@ from helpers import (
 from llm import OPENROUTER_DEFAULT_MODEL, OPENROUTER_PROVIDER, LLMService, OpenRouterLLM, parse_json_response
 from logging_security import install_telegram_logging_redaction, register_telegram_bot_token
 from telegram_relations import classify_message, message_evidence_status, message_id
+from v2.service import (
+    V2NotFound,
+    append_user_message,
+    inbox_snapshot,
+    json_safe,
+    list_documents,
+    list_knowledge,
+    thread_response,
+)
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 install_telegram_logging_redaction()
@@ -75,6 +84,12 @@ REVIEW_EMBEDDING_PROVIDERS = {"normalized_terms", "openrouter"}
 
 class QueryIn(BaseModel):
     question: str = Field(min_length=2, max_length=4000)
+
+
+class V2InboxMessageIn(BaseModel):
+    content: str = Field(min_length=1, max_length=12000)
+    thread_id: int | None = Field(default=None, gt=0)
+    channel: str = Field(default="inbox", min_length=1, max_length=32)
 
 
 def telegram_token() -> str:
@@ -1180,6 +1195,7 @@ def support_case(case_id: int, x_api_key: str | None = Header(None)):
 
 REVIEW_UI_PATH = Path(__file__).with_name("review.html")
 PUBLISHED_UI_PATH = Path(__file__).with_name("published.html")
+V2_TEMPLATE_DIR = Path(__file__).with_name("templates")
 REVIEW_ROLE_VALUES = {
     "user_report", "engineer_hypothesis", "engineer_instruction",
     "observed_result", "confirmed_resolution", "unconfirmed_claim", "irrelevant",
@@ -1686,6 +1702,100 @@ def published_page():
     if not PUBLISHED_UI_PATH.is_file():
         raise HTTPException(404, "Published Knowledge UI is not installed")
     return FileResponse(PUBLISHED_UI_PATH, media_type="text/html")
+
+
+def _v2_page(name: str) -> FileResponse:
+    path = V2_TEMPLATE_DIR / name
+    if not path.is_file():
+        raise HTTPException(404, "V2 page is not installed")
+    return FileResponse(path, media_type="text/html")
+
+
+@app.get("/inbox")
+def v2_inbox_page():
+    return _v2_page("inbox.html")
+
+
+@app.get("/knowledge")
+def v2_knowledge_page():
+    return _v2_page("knowledge.html")
+
+
+@app.get("/documents")
+def v2_documents_page():
+    return _v2_page("documents.html")
+
+
+@app.get("/chat")
+def v2_chat_page():
+    return _v2_page("chat.html")
+
+
+@app.get("/api/v2/inbox")
+def v2_inbox(x_api_key: str | None = Header(None)):
+    auth(x_api_key)
+    with db() as conn:
+        return json_safe(inbox_snapshot(conn))
+
+
+@app.post("/api/v2/inbox/messages")
+def v2_inbox_message(payload: V2InboxMessageIn, x_api_key: str | None = Header(None)):
+    auth(x_api_key)
+    try:
+        with db() as conn:
+            saved = append_user_message(
+                conn,
+                payload.content,
+                thread_id=payload.thread_id,
+                channel=payload.channel,
+                mode="learn",
+            )
+            current = thread_response(conn, int(saved["thread"]["id"]))
+            return json_safe({
+                "thread_id": saved["thread"]["id"],
+                "thread": current["thread"],
+                "messages": current["messages"],
+                "message": saved["message"],
+                "evidence": saved["evidence"],
+                "status": "received",
+            })
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except V2NotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.get("/api/v2/inbox/threads/{thread_id}")
+def v2_inbox_thread(thread_id: int, x_api_key: str | None = Header(None)):
+    auth(x_api_key)
+    try:
+        with db() as conn:
+            return json_safe(thread_response(conn, thread_id))
+    except V2NotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.get("/api/v2/knowledge")
+def v2_knowledge(x_api_key: str | None = Header(None)):
+    auth(x_api_key)
+    with db() as conn:
+        items = list_knowledge(conn)
+    return json_safe({"items": items, "total": len(items)})
+
+
+@app.get("/api/v2/documents")
+def v2_documents(x_api_key: str | None = Header(None)):
+    auth(x_api_key)
+    with db() as conn:
+        items = list_documents(conn)
+    return json_safe({"items": items, "total": len(items)})
+
+
+@app.get("/api/v2/chat")
+def v2_chat(x_api_key: str | None = Header(None)):
+    auth(x_api_key)
+    with db() as conn:
+        return json_safe(inbox_snapshot(conn))
 
 
 def _review_complete_payload(payload: dict | None, candidate: dict) -> dict:
