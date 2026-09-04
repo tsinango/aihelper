@@ -10,13 +10,163 @@
 <style>
   .nav { overflow-x: auto; }
   .nav a { white-space: nowrap; }
+  .key-settings{margin-left:auto;color:var(--muted);font-size:12px;position:relative}.key-settings summary{cursor:pointer;list-style:none;padding:7px 9px;border:1px solid transparent;border-radius:8px;white-space:nowrap}.key-settings summary::-webkit-details-marker{display:none}.key-settings summary::after{content:'⌄';margin-left:5px}.key-settings[open] summary{border-color:#cbd5e1;background:#f8fafc}.key-panel{position:absolute;right:0;top:calc(100% + 6px);z-index:2;display:grid;grid-template-columns:auto minmax(150px,1fr) auto;align-items:center;gap:8px;width:min(360px,calc(100vw - 20px));padding:10px;background:#fff;border:1px solid var(--line);border-radius:9px;box-shadow:0 8px 22px #1018281a}.key-panel input{min-width:0;border:1px solid #cbd5e1;border-radius:7px;padding:7px 8px}.key-panel input:focus{outline:2px solid #bfdbfe;border-color:var(--blue)}.quick-replies{display:flex;gap:7px;flex-wrap:wrap;margin-top:9px}.quick-replies button{font-size:12px;padding:6px 10px}
 </style>
 </head>
 <body>
-  <header class="topbar"><div class="shell top-inner"><a class="brand" href="/inbox">aihelper V2</a><nav class="nav" aria-label="主导航"><a href="/inbox">Inbox</a><a href="/knowledge">Knowledge</a><a href="/documents">Documents</a><a class="active" href="/chat">Chat</a></nav><label class="keybox">API Key <input id="api-key" type="password" autocomplete="off" placeholder="sessionStorage"><span id="key-status">未设置</span></label></div></header>
+  <header class="topbar"><div class="shell top-inner"><a class="brand" href="/inbox">aihelper V2</a><nav class="nav" aria-label="主导航"><a href="/inbox">Inbox</a><a href="/knowledge">Knowledge</a><a href="/documents">Documents</a><a class="active" href="/chat">Chat</a></nav><details class="key-settings" id="key-settings"><summary>设置 <span id="key-status">未设置</span></summary><div class="key-panel"><label for="api-key">API Key</label><input id="api-key" type="password" autocomplete="off" placeholder="输入后保存"><button id="save-key" type="button">保存</button></div></details></div></header>
   <main class="shell page"><div id="error" class="error" hidden></div><section class="chat-card"><header class="chat-head"><h1>Chat</h1><p>只根据已经确认的产品知识回答。没有足够依据时，我会明确告诉你。</p></header><div id="messages" class="messages"><div class="empty"><strong>你好</strong>问一个产品问题，或粘贴一段资料开始对话。</div></div><form id="composer" class="composer"><textarea id="input" placeholder="输入产品问题…" aria-label="产品问题"></textarea><button class="primary" type="submit">发送</button></form><div class="note">Enter 发送 · Shift + Enter 换行</div></section></main>
   <script>
-    const $=id=>document.getElementById(id),key=$('api-key'),state={threadId:new URLSearchParams(location.search).get('thread')};key.value=sessionStorage.getItem('x-api-key')||'';function saveKey(){const clean=key.value.trim();sessionStorage.setItem('x-api-key',clean);$('key-status').textContent=clean?'已保存':'未设置'}saveKey();key.addEventListener('change',saveKey);const headers=json=>({'x-api-key':sessionStorage.getItem('x-api-key')||'',...(json?{'Content-Type':'application/json'}:{})});async function api(path,options={}){if(!sessionStorage.getItem('x-api-key'))throw Error('请先在顶部填写 API Key');let r;try{r=await fetch(path,{...options,headers:{...headers(Boolean(options.body)),...(options.headers||{})}})}catch(_){throw Error('无法连接服务，请确认 API 已启动')}let d={};try{d=await r.json()}catch(_){ }if(!r.ok)throw Error(d.detail||d.message||`请求失败（${r.status}）`);return d}function list(data){if(Array.isArray(data))return data;if(!data||typeof data!=='object')return [];const result=data.messages||data.items||[];return Array.isArray(result)?result:[]}function value(item,...keys){for(const key of keys)if(item&&item[key]!=null)return item[key];return ''}function sourceLabels(sources){if(sources==null||sources==='')return [];const list=Array.isArray(sources)?sources:[sources];return list.map(x=>typeof x==='string'?x:value(x,'title','name','label')).filter(Boolean).map(String)}function render(data){const messages=list(data),box=$('messages');box.replaceChildren();if(!messages.length){box.innerHTML='<div class="empty"><strong>你好</strong>问一个产品问题，或粘贴一段资料开始对话。</div>';return}for(const item of messages){const role=String(value(item,'role','sender_type','author')||'assistant').toLowerCase(),user=['user','human','me','customer'].includes(role),row=document.createElement('div');row.className='message-row '+(user?'user':'assistant');const wrap=document.createElement('div');wrap.className='wrap';const meta=document.createElement('div');meta.className='meta';meta.textContent=user?'我':'aihelper';const bubble=document.createElement('div');bubble.className='bubble';bubble.textContent=String(value(item,'content','text','message','body'));const labels=sourceLabels(value(item,'sources','source'));if(labels.length){const sourceBox=document.createElement('div');sourceBox.className='sources';sourceBox.textContent='来源：'+labels.join('、');bubble.append(sourceBox)}wrap.append(meta,bubble);row.append(wrap);box.append(row)}box.scrollTop=box.scrollHeight}async function loadThread(){if(!state.threadId)return;try{render(await api(`/api/v2/inbox/threads/${encodeURIComponent(state.threadId)}`))}catch(e){showError(e.message)}}async function send(content){const button=$('#composer button');button.disabled=true;try{const body={content};if(state.threadId)body.thread_id=state.threadId;const data=await api('/api/v2/inbox/messages',{method:'POST',body:JSON.stringify(body)});state.threadId=data.thread_id||state.threadId;render(data.messages?data:data.thread?data.thread:{messages:[{role:'user',content}]});if(state.threadId)history.replaceState(null,'',`/chat?thread=${encodeURIComponent(state.threadId)}`)}catch(e){const input=$('input');if(!input.value)input.value=content;showError(e.message)}finally{button.disabled=false}}function showError(msg){$('error').textContent=msg;$('error').hidden=false}$('composer').addEventListener('submit',e=>{e.preventDefault();const input=$('input'),content=input.value.trim();if(!content)return;input.value='';send(content)});$('input').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();$('composer').requestSubmit()}});loadThread();
+    const $ = id => document.getElementById(id);
+    const keyInput = $('api-key');
+    const input = $('input');
+    const state = {threadId: new URLSearchParams(location.search).get('thread')};
+    keyInput.value = sessionStorage.getItem('x-api-key') || '';
+
+    function setKey(value) {
+      const clean = value.trim();
+      sessionStorage.setItem('x-api-key', clean);
+      $('key-status').textContent = clean ? '已保存' : '未设置';
+    }
+
+    setKey(keyInput.value);
+    $('save-key').addEventListener('click', () => {
+      setKey(keyInput.value);
+      $('key-settings').open = false;
+      loadThread();
+    });
+    keyInput.addEventListener('keydown', event => {
+      if (event.key === 'Enter') $('save-key').click();
+    });
+
+    const headers = json => ({'x-api-key': sessionStorage.getItem('x-api-key') || '', ...(json ? {'Content-Type': 'application/json'} : {})});
+
+    async function api(path, options = {}) {
+      if (!sessionStorage.getItem('x-api-key')) {
+        $('key-settings').open = true;
+        keyInput.focus();
+        throw Error('请先在设置中保存 API Key');
+      }
+      let response;
+      try {
+        response = await fetch(path, {...options, headers: {...headers(Boolean(options.body)), ...(options.headers || {})}});
+      } catch (_) {
+        throw Error('无法连接服务，请确认 API 已启动');
+      }
+      let data = {};
+      try { data = await response.json(); } catch (_) { /* empty or non-JSON response */ }
+      if (!response.ok) throw Error(data.detail || data.message || `请求失败（${response.status}）`);
+      return data;
+    }
+
+    function list(data) {
+      if (Array.isArray(data)) return data;
+      if (!data || typeof data !== 'object') return [];
+      const result = data.messages || data.items || [];
+      return Array.isArray(result) ? result : [];
+    }
+
+    function value(item, ...keys) {
+      for (const key of keys) if (item && item[key] != null) return item[key];
+      return '';
+    }
+
+    function sourceLabels(sources) {
+      if (sources == null || sources === '') return [];
+      const values = Array.isArray(sources) ? sources : [sources];
+      return values.map(item => typeof item === 'string' ? item : value(item, 'title', 'name', 'label')).filter(Boolean).map(String);
+    }
+
+    function renderQuickReplies(container) {
+      const replies = document.createElement('div');
+      replies.className = 'quick-replies';
+      replies.setAttribute('aria-label', '快速回复');
+      for (const label of ['对', '我来修正', '不知道', '跳过']) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = label;
+        button.onclick = () => label === '我来修正' ? input.focus() : send(label);
+        replies.append(button);
+      }
+      container.append(replies);
+    }
+
+    function render(data) {
+      const messages = list(data);
+      const box = $('messages');
+      box.replaceChildren();
+      if (!messages.length) {
+        box.innerHTML = '<div class="empty"><strong>你好</strong>问一个产品问题，或粘贴一段资料开始对话。</div>';
+        return;
+      }
+      const lastIndex = messages.length - 1;
+      for (const [index, item] of messages.entries()) {
+        const role = String(value(item, 'role', 'sender_type', 'author') || 'assistant').toLowerCase();
+        const user = ['user', 'human', 'me', 'customer'].includes(role);
+        const row = document.createElement('div');
+        row.className = 'message-row ' + (user ? 'user' : 'assistant');
+        const wrap = document.createElement('div');
+        wrap.className = 'wrap';
+        const meta = document.createElement('div');
+        meta.className = 'meta';
+        meta.textContent = user ? '我' : 'aihelper';
+        const bubble = document.createElement('div');
+        bubble.className = 'bubble';
+        bubble.textContent = String(value(item, 'content', 'text', 'message', 'body'));
+        const labels = sourceLabels(value(item, 'sources', 'source'));
+        if (labels.length) {
+          const sourceBox = document.createElement('div');
+          sourceBox.className = 'sources';
+          sourceBox.textContent = '来源：' + labels.join('、');
+          bubble.append(sourceBox);
+        }
+        wrap.append(meta, bubble);
+        if (index === lastIndex && !user && String(value(item, 'message_type', 'type')).toLowerCase() === 'question') renderQuickReplies(wrap);
+        row.append(wrap);
+        box.append(row);
+      }
+      box.scrollTop = box.scrollHeight;
+    }
+
+    async function loadThread() {
+      if (!state.threadId) return;
+      try { render(await api(`/api/v2/inbox/threads/${encodeURIComponent(state.threadId)}`)); }
+      catch (error) { showError(error.message); }
+    }
+
+    async function send(content) {
+      const button = $('#composer button');
+      button.disabled = true;
+      try {
+        const body = {content};
+        if (state.threadId) body.thread_id = state.threadId;
+        const data = await api('/api/v2/inbox/messages', {method: 'POST', body: JSON.stringify(body)});
+        state.threadId = data.thread_id || state.threadId;
+        render(data.messages ? data : data.thread ? data.thread : {messages: [{role: 'user', content}]});
+        if (state.threadId) history.replaceState(null, '', `/chat?thread=${encodeURIComponent(state.threadId)}`);
+      } catch (error) {
+        if (!input.value) input.value = content;
+        showError(error.message);
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    function showError(message) { $('error').textContent = message; $('error').hidden = false; }
+    $('composer').addEventListener('submit', event => {
+      event.preventDefault();
+      const content = input.value.trim();
+      if (!content) return;
+      input.value = '';
+      send(content);
+    });
+    input.addEventListener('keydown', event => {
+      if (event.key === 'Enter' && !event.shiftKey) {
+        event.preventDefault();
+        $('composer').requestSubmit();
+      }
+    });
+    loadThread();
   </script>
 </body>
 </html>
