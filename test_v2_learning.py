@@ -171,7 +171,7 @@ class LearningLoopTest(unittest.TestCase):
         self.assertTrue(any("SET status=%s" in query and params[0] == "confirmed" for query, params in conn.executed))
 
     def test_unknown_and_skip_are_legal_without_reasking_same_proposal(self):
-        for answer, expected in (("不知道", "unknown"), ("跳过", "skip")):
+        for answer, expected in (("不知道", "unknown"), ("跳过", "skipped")):
             pending = {"id": 30, "thread_id": 7, "fact_text": "F-X 支持某功能", "confirmed_knowledge_id": 20}
             common = self._patch_common(pending)
             with patch("v2.learning._next_question", return_value=(None, None, None)), patch("v2.learning._summary", return_value=(None, None)), patch("v2.learning._model_facts") as model:
@@ -181,7 +181,7 @@ class LearningLoopTest(unittest.TestCase):
             common[5].assert_called_once_with(
                 unittest.mock.ANY,
                 30,
-                "skipped" if expected == "skip" else "unknown",
+                expected,
                 message_id=11,
             )
 

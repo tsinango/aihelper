@@ -179,8 +179,16 @@ def _insert_message(
     return row
 
 
-def _ensure_session(conn, thread_id: int, question_budget: int) -> dict:
+def _ensure_session(
+    conn,
+    thread_id: int,
+    question_budget: int,
+    *,
+    session_type: str = "active_inbox",
+) -> dict:
     budget = max(0, int(question_budget))
+    if session_type not in {"passive", "active_inbox", "active_grill"}:
+        raise ValueError(f"unknown V2 learning session type: {session_type}")
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -201,12 +209,12 @@ def _ensure_session(conn, thread_id: int, question_budget: int) -> dict:
             INSERT INTO v2_learning_sessions(
                 thread_id, session_type, status, question_budget
             )
-            VALUES(%s, 'passive', 'active', %s)
+            VALUES(%s, %s, 'active', %s)
             RETURNING id, thread_id, session_type, status, question_budget,
                       questions_asked, summary, started_at, completed_at,
                       created_at, updated_at
             """,
-            (thread_id, budget),
+            (thread_id, session_type, budget),
         )
         return dict(cur.fetchone())
 
@@ -471,7 +479,7 @@ def _confirm(conn, proposal: dict, evidence: dict, message: dict) -> dict:
 
 
 def _retire_corrected_knowledge(conn, proposal: dict) -> None:
-    """Remove a superseded provisional interpretation from active retrieval."""
+    """Reject this proposal's source and retire unsupported provisional text."""
 
     knowledge_id = proposal.get("confirmed_knowledge_id")
     if not knowledge_id:
@@ -479,21 +487,33 @@ def _retire_corrected_knowledge(conn, proposal: dict) -> None:
     with conn.cursor() as cur:
         cur.execute(
             """
-            UPDATE v2_knowledge
-            SET active=FALSE, updated_at=CURRENT_TIMESTAMP
-            WHERE id=%s AND active=TRUE AND trust='provisional'
-            RETURNING id
+            SELECT raw_evidence_id
+            FROM v2_inbox_messages
+            WHERE id=%s
             """,
-            (knowledge_id,),
+            (proposal.get("source_message_id"),),
         )
-        retired = cur.fetchone()
-        if retired is None:
+        source_message = cur.fetchone()
+        if source_message is None or source_message["raw_evidence_id"] is None:
             return
         cur.execute(
             """
             UPDATE v2_knowledge_sources
             SET active=FALSE, resolution='rejected'
-            WHERE knowledge_id=%s AND active=TRUE
+            WHERE knowledge_id=%s AND raw_evidence_id=%s AND active=TRUE
+            """,
+            (knowledge_id, source_message["raw_evidence_id"]),
+        )
+        cur.execute(
+            """
+            UPDATE v2_knowledge k
+            SET active=FALSE, updated_at=CURRENT_TIMESTAMP
+            WHERE k.id=%s AND k.active=TRUE AND k.trust='provisional'
+              AND NOT EXISTS (
+                SELECT 1 FROM v2_knowledge_sources s
+                WHERE s.knowledge_id=k.id AND s.active=TRUE
+                  AND s.relation='supports'
+              )
             """,
             (knowledge_id,),
         )
@@ -597,10 +617,21 @@ def learn_turn(
             thread = get_thread(conn, int(thread_id))
         current_thread_id = int(thread["id"])
         _lock_thread(conn, current_thread_id)
-        session = _ensure_session(conn, current_thread_id, question_budget)
+        requested_session_type = (
+            "active_inbox" if channel in {"inbox", "chat"} else "passive"
+        )
+        session = _ensure_session(
+            conn,
+            current_thread_id,
+            question_budget,
+            session_type=requested_session_type,
+        )
         # Direct Inbox/Chat work is an explicitly active interaction.  The
         # passive daily budget is for unsolicited questions only.
-        session["_unlimited_questions"] = channel in {"inbox", "chat"}
+        session["_unlimited_questions"] = session.get("session_type") in {
+            "active_inbox",
+            "active_grill",
+        }
         pending = _pending_proposal(conn, current_thread_id)
         evidence = _insert_evidence(conn, clean, current_thread_id, channel=channel)
         reply_kind = classify_reply(clean) if pending else "new"
@@ -675,7 +706,7 @@ def learn_turn(
             return _result(
                 conn,
                 current_thread_id,
-                status=reply_kind,
+                status=proposal_status,
                 message=acknowledgement_message,
                 summary=summary_text,
             )
