@@ -10,17 +10,12 @@ from __future__ import annotations
 
 import logging
 import re
+from contextlib import nullcontext
 from typing import Any
 
 from llm import parse_json_response
 
-from v2.service import (
-    V2NotFound,
-    create_thread,
-    get_thread,
-    json_safe,
-    thread_response,
-)
+from v2.service import create_thread, get_thread, json_safe, thread_response
 from psycopg.types.json import Jsonb
 
 
@@ -30,6 +25,10 @@ TRUST_VALUES = frozenset({
     "official_source", "user_confirmed", "provisional", "conflicted",
 })
 ANSWER_TRUST_VALUES = frozenset({"official_source", "user_confirmed"})
+PROPOSAL_STATUSES = frozenset({
+    "pending_confirmation", "confirmed", "corrected", "skipped",
+    "unknown", "rejected", "superseded",
+})
 
 CONFIRM_WORDS = frozenset({
     "对", "对的", "正确", "没错", "是的", "确认", "是", "yes", "true", "y",
@@ -118,7 +117,14 @@ def _model_facts(content: str, llm_service=None, context: list[dict] | None = No
     return _fallback_facts(content), True
 
 
-def _insert_evidence(conn, content: str, thread_id: int, *, label: str = "Inbox") -> dict:
+def _insert_evidence(
+    conn,
+    content: str,
+    thread_id: int,
+    *,
+    channel: str = "inbox",
+    label: str = "Inbox",
+) -> dict:
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -132,7 +138,7 @@ def _insert_evidence(conn, content: str, thread_id: int, *, label: str = "Inbox"
             """,
             (
                 content,
-                Jsonb({"thread_id": thread_id, "channel": "inbox"}),
+                Jsonb({"thread_id": thread_id, "channel": channel}),
                 label,
                 f"v2-thread:{thread_id}",
             ),
@@ -232,6 +238,18 @@ def _pending_context(conn, thread_id: int) -> list[dict]:
         return [dict(row) for row in cur.fetchall()]
 
 
+def _lock_thread(conn, thread_id: int) -> None:
+    """Serialize state transitions and message sequence allocation per thread."""
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id FROM v2_inbox_threads WHERE id=%s FOR UPDATE",
+            (thread_id,),
+        )
+        if cur.fetchone() is None:
+            raise ValueError(f"V2 thread {thread_id} disappeared during the learning turn")
+
+
 def _find_knowledge(conn, fact: dict) -> dict | None:
     with conn.cursor() as cur:
         cur.execute(
@@ -326,6 +344,28 @@ def _insert_proposal(conn, thread_id: int, message_id: int, evidence_id: int, fa
     return proposal
 
 
+def _deduplicate_facts(facts: list[dict]) -> list[dict]:
+    """Keep one proposal per normalized fact in a single model response."""
+
+    result = []
+    seen = set()
+    for fact in facts:
+        content = _clean(fact.get("content"))
+        entity_name = _clean(fact.get("entity_name"), 500)
+        if not content:
+            continue
+        key = (content.casefold(), entity_name.casefold())
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append({
+            "title": _clean(fact.get("title"), 500) or content[:120],
+            "content": content,
+            "entity_name": entity_name,
+        })
+    return result
+
+
 def _session_question_count(conn, session_id: int) -> tuple[int, int]:
     with conn.cursor() as cur:
         cur.execute("SELECT questions_asked, question_budget FROM v2_learning_sessions WHERE id=%s", (session_id,))
@@ -334,8 +374,11 @@ def _session_question_count(conn, session_id: int) -> tuple[int, int]:
 
 
 def _ask(conn, proposal: dict, session: dict) -> tuple[dict | None, str | None]:
-    asked, budget = _session_question_count(conn, int(session["id"]))
-    if asked >= budget:
+    if session.get("_unlimited_questions"):
+        asked, budget = 0, None
+    else:
+        asked, budget = _session_question_count(conn, int(session["id"]))
+    if budget is not None and asked >= budget:
         return None, None
     text = f"我理解为：{proposal['fact_text']}。对吗？"
     message = _insert_message(conn, int(proposal["thread_id"]), "assistant", "question", text)
@@ -359,7 +402,16 @@ def _ask(conn, proposal: dict, session: dict) -> tuple[dict | None, str | None]:
     return message, text
 
 
-def _update_proposal(conn, proposal_id: int, status: str, *, knowledge_id: int | None = None, message_id: int | None = None) -> None:
+def _update_proposal(
+    conn,
+    proposal_id: int,
+    status: str,
+    *,
+    knowledge_id: int | None = None,
+    message_id: int | None = None,
+) -> dict:
+    if status not in PROPOSAL_STATUSES:
+        raise ValueError(f"unknown V2 proposal status: {status}")
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -367,13 +419,23 @@ def _update_proposal(conn, proposal_id: int, status: str, *, knowledge_id: int |
             SET status=%s, confirmed_knowledge_id=COALESCE(%s, confirmed_knowledge_id),
                 resolution_message_id=COALESCE(%s, resolution_message_id),
                 updated_at=CURRENT_TIMESTAMP
-            WHERE id=%s
+            WHERE id=%s AND status='pending_confirmation'
+            RETURNING id, thread_id, source_message_id, question_message_id,
+                      fact_text, entity_name, proposed_trust, status,
+                      confirmed_knowledge_id, resolution_message_id,
+                      created_at, updated_at
             """,
             (status, knowledge_id, message_id, proposal_id),
         )
+        row = cur.fetchone()
+    if row is None:
+        raise ValueError(f"V2 proposal {proposal_id} is no longer pending")
+    return dict(row)
 
 
 def _confirm(conn, proposal: dict, evidence: dict, message: dict) -> dict:
+    if proposal.get("status") not in (None, "pending_confirmation"):
+        raise ValueError("only a pending V2 proposal can be confirmed")
     knowledge_id = proposal.get("confirmed_knowledge_id")
     if not knowledge_id:
         raise ValueError("pending proposal has no provisional Knowledge")
@@ -381,14 +443,21 @@ def _confirm(conn, proposal: dict, evidence: dict, message: dict) -> dict:
         cur.execute(
             """
             UPDATE v2_knowledge
-            SET trust='user_confirmed', active=TRUE, updated_at=CURRENT_TIMESTAMP
-            WHERE id=%s
+            SET trust=CASE WHEN trust='official_source'
+                           THEN 'official_source'
+                           ELSE 'user_confirmed' END,
+                active=TRUE, updated_at=CURRENT_TIMESTAMP
+            WHERE id=%s AND active=TRUE
+              AND trust IN ('official_source', 'user_confirmed', 'provisional')
             RETURNING id, title, content, entity_name, trust, active,
                       created_at, updated_at
             """,
             (knowledge_id,),
         )
-        knowledge = dict(cur.fetchone())
+        row = cur.fetchone()
+    if row is None:
+        raise ValueError("the Knowledge attached to this proposal is inactive or conflicted")
+    knowledge = dict(row)
     _link_source(
         conn,
         int(knowledge_id),
@@ -399,6 +468,35 @@ def _confirm(conn, proposal: dict, evidence: dict, message: dict) -> dict:
     )
     _update_proposal(conn, int(proposal["id"]), "confirmed", knowledge_id=int(knowledge_id), message_id=int(message["id"]))
     return knowledge
+
+
+def _retire_corrected_knowledge(conn, proposal: dict) -> None:
+    """Remove a superseded provisional interpretation from active retrieval."""
+
+    knowledge_id = proposal.get("confirmed_knowledge_id")
+    if not knowledge_id:
+        return
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE v2_knowledge
+            SET active=FALSE, updated_at=CURRENT_TIMESTAMP
+            WHERE id=%s AND active=TRUE AND trust='provisional'
+            RETURNING id
+            """,
+            (knowledge_id,),
+        )
+        retired = cur.fetchone()
+        if retired is None:
+            return
+        cur.execute(
+            """
+            UPDATE v2_knowledge_sources
+            SET active=FALSE, resolution='rejected'
+            WHERE knowledge_id=%s AND active=TRUE
+            """,
+            (knowledge_id,),
+        )
 
 
 def _summary(conn, thread_id: int, session: dict) -> tuple[dict | None, str | None]:
@@ -415,9 +513,27 @@ def _summary(conn, thread_id: int, session: dict) -> tuple[dict | None, str | No
             (thread_id, session["started_at"]),
         )
         facts = [dict(row) for row in cur.fetchall()]
+        cur.execute(
+            """
+            SELECT status, count(*) AS count
+            FROM v2_learning_proposals
+            WHERE thread_id=%s AND updated_at >= %s
+              AND status IN ('corrected', 'unknown', 'skipped')
+            GROUP BY status
+            """,
+            (thread_id, session["started_at"]),
+        )
+        outcomes = {row["status"]: int(row["count"]) for row in cur.fetchall()}
+    corrected = outcomes.get("corrected", 0)
+    unresolved = outcomes.get("unknown", 0) + outcomes.get("skipped", 0)
+    lines = [f"今天我学会了 {len(facts)} 件事："]
+    lines.extend(f"* {item['content']}" for item in facts)
     if not facts:
-        return None, None
-    lines = [f"今天我学会了 {len(facts)} 件事：", *[f"* {item['content']}" for item in facts]]
+        lines.append("* 暂时没有新增已确认知识。")
+    if corrected:
+        lines.append(f"我修正了 {corrected} 条旧理解。")
+    if unresolved:
+        lines.append(f"还有 {unresolved} 个问题没有确认。")
     text = "\n".join(lines)
     with conn.cursor() as cur:
         cur.execute(
@@ -473,71 +589,163 @@ def learn_turn(
     clean = _clean(content)
     if not clean:
         raise ValueError("content must not be empty")
-    if thread_id is None:
-        thread = create_thread(conn, channel=channel, mode="learn")
-    else:
-        thread = get_thread(conn, int(thread_id))
-    current_thread_id = int(thread["id"])
-    session = _ensure_session(conn, current_thread_id, question_budget)
-    pending = _pending_proposal(conn, current_thread_id)
-    evidence = _insert_evidence(conn, clean, current_thread_id)
-    reply_kind = classify_reply(clean) if pending else "new"
-    message_type = {
-        "confirm": "confirmation",
-        "unknown": "unknown",
-        "skip": "skip",
-        "correction": "correction",
-    }.get(reply_kind, "evidence")
-    user_message = _insert_message(conn, current_thread_id, "user", message_type, clean, int(evidence["id"]))
-
-    if pending and reply_kind == "confirm":
-        knowledge = _confirm(conn, pending, evidence, user_message)
-        next_message, next_text, next_proposal = _next_question(conn, current_thread_id, session)
-        if next_message:
-            return _result(conn, current_thread_id, status="awaiting_confirmation", message=next_message, proposal=next_proposal)
-        summary_message, summary_text = _summary(conn, current_thread_id, session)
-        return _result(conn, current_thread_id, status="confirmed", message=summary_message, summary=summary_text)
-
-    if pending and reply_kind in {"unknown", "skip"}:
-        _update_proposal(conn, int(pending["id"]), reply_kind)
-        acknowledgement = (
-            "好的，我先记下你现在不知道。以后有新的资料或上下文时再回来。"
-            if reply_kind == "unknown" else
-            "好的，先跳过这个问题。我不会反复追问。"
+    transaction = conn.transaction() if callable(getattr(conn, "transaction", None)) else nullcontext()
+    with transaction:
+        if thread_id is None:
+            thread = create_thread(conn, channel=channel, mode="learn")
+        else:
+            thread = get_thread(conn, int(thread_id))
+        current_thread_id = int(thread["id"])
+        _lock_thread(conn, current_thread_id)
+        session = _ensure_session(conn, current_thread_id, question_budget)
+        # Direct Inbox/Chat work is an explicitly active interaction.  The
+        # passive daily budget is for unsolicited questions only.
+        session["_unlimited_questions"] = channel in {"inbox", "chat"}
+        pending = _pending_proposal(conn, current_thread_id)
+        evidence = _insert_evidence(conn, clean, current_thread_id, channel=channel)
+        reply_kind = classify_reply(clean) if pending else "new"
+        message_type = {
+            "confirm": "confirmation",
+            "unknown": "unknown",
+            "skip": "skip",
+            "correction": "correction",
+        }.get(reply_kind, "evidence")
+        user_message = _insert_message(
+            conn, current_thread_id, "user", message_type, clean, int(evidence["id"])
         )
-        acknowledgement_message = _insert_message(conn, current_thread_id, "assistant", "text", acknowledgement)
-        next_message, _, next_proposal = _next_question(conn, current_thread_id, session)
-        if next_message:
-            return _result(conn, current_thread_id, status="awaiting_confirmation", message=next_message, proposal=next_proposal)
-        return _result(conn, current_thread_id, status=reply_kind, message=acknowledgement_message)
 
-    facts, fallback = _model_facts(clean, llm_service, _pending_context(conn, current_thread_id) if pending else None)
-    if pending:
-        _update_proposal(conn, int(pending["id"]), "corrected", message_id=int(user_message["id"]))
+        # A retry after confirmation (or a bare control word in a new thread)
+        # is not product knowledge.  Keep the raw input and explain the state.
+        if not pending and classify_reply(clean) in {"confirm", "unknown", "skip"}:
+            response = _insert_message(
+                conn,
+                current_thread_id,
+                "assistant",
+                "text",
+                "当前没有待确认的问题；请直接告诉我新的产品信息。",
+            )
+            return _result(conn, current_thread_id, status="no_pending", message=response)
 
-    first_proposal = None
-    for fact in facts:
-        existing = _find_knowledge(conn, fact)
-        if existing and existing["trust"] in ANSWER_TRUST_VALUES:
-            _link_source(conn, int(existing["id"]), int(evidence["id"]), source_kind="user_input", source_role="supporting", excerpt=fact["content"])
-            continue
-        knowledge = existing or _create_knowledge(conn, fact, trust="provisional")
-        proposal = _insert_proposal(conn, current_thread_id, int(user_message["id"]), int(evidence["id"]), fact, int(knowledge["id"]))
+        if pending and reply_kind == "confirm":
+            _confirm(conn, pending, evidence, user_message)
+            next_message, _, next_proposal = _next_question(conn, current_thread_id, session)
+            if next_message:
+                return _result(
+                    conn,
+                    current_thread_id,
+                    status="awaiting_confirmation",
+                    message=next_message,
+                    proposal=next_proposal,
+                )
+            summary_message, summary_text = _summary(conn, current_thread_id, session)
+            return _result(
+                conn,
+                current_thread_id,
+                status="confirmed",
+                message=summary_message,
+                summary=summary_text,
+            )
+
+        if pending and reply_kind in {"unknown", "skip"}:
+            proposal_status = "skipped" if reply_kind == "skip" else "unknown"
+            _update_proposal(
+                conn,
+                int(pending["id"]),
+                proposal_status,
+                message_id=int(user_message["id"]),
+            )
+            acknowledgement = (
+                "好的，我先记下你现在不知道。以后有新的资料或上下文时再回来。"
+                if reply_kind == "unknown" else
+                "好的，先跳过这个问题。我不会反复追问。"
+            )
+            acknowledgement_message = _insert_message(
+                conn, current_thread_id, "assistant", "text", acknowledgement
+            )
+            next_message, _, next_proposal = _next_question(conn, current_thread_id, session)
+            if next_message:
+                return _result(
+                    conn,
+                    current_thread_id,
+                    status="awaiting_confirmation",
+                    message=next_message,
+                    proposal=next_proposal,
+                )
+            _, summary_text = _summary(conn, current_thread_id, session)
+            return _result(
+                conn,
+                current_thread_id,
+                status=reply_kind,
+                message=acknowledgement_message,
+                summary=summary_text,
+            )
+
+        facts, fallback = _model_facts(
+            clean,
+            llm_service,
+            _pending_context(conn, current_thread_id) if pending else None,
+        )
+        facts = _deduplicate_facts(facts)
+        if pending:
+            _retire_corrected_knowledge(conn, pending)
+            _update_proposal(
+                conn, int(pending["id"]), "corrected", message_id=int(user_message["id"])
+            )
+
+        first_proposal = None
+        for fact in facts:
+            existing = _find_knowledge(conn, fact)
+            if existing and existing["trust"] in ANSWER_TRUST_VALUES:
+                # This turn is provisional user input.  Retaining the raw
+                # evidence is sufficient for an exact duplicate; linking it
+                # to a trusted fact would merge lower-trust provenance.
+                continue
+            knowledge = existing or _create_knowledge(conn, fact, trust="provisional")
+            proposal = _insert_proposal(
+                conn,
+                current_thread_id,
+                int(user_message["id"]),
+                int(evidence["id"]),
+                fact,
+                int(knowledge["id"]),
+            )
+            if first_proposal is None:
+                first_proposal = proposal
+
         if first_proposal is None:
-            first_proposal = proposal
+            response = _insert_message(
+                conn,
+                current_thread_id,
+                "assistant",
+                "text",
+                "这条信息和已有的已确认知识一致；我保留了原始输入，但没有把未确认来源并入已确认知识。",
+            )
+            return _result(conn, current_thread_id, status="reused", message=response, fallback=fallback)
 
-    if first_proposal is None:
-        response = _insert_message(
+        question_message, _, active_proposal = _next_question(
+            conn, current_thread_id, session
+        )
+        if not question_message:
+            response = _insert_message(
+                conn,
+                current_thread_id,
+                "assistant",
+                "text",
+                "我先记下这条待确认信息，稍后再问你。",
+            )
+            return _result(
+                conn,
+                current_thread_id,
+                status="waiting",
+                message=response,
+                proposal=active_proposal,
+                fallback=fallback,
+            )
+        return _result(
             conn,
             current_thread_id,
-            "assistant",
-            "text",
-            "这条信息和已有的已确认知识一致，我已保留这次原始来源。",
+            status="awaiting_confirmation",
+            message=question_message,
+            proposal=active_proposal,
+            fallback=fallback,
         )
-        return _result(conn, current_thread_id, status="reused", message=response, fallback=fallback)
-
-    question_message, _, active_proposal = _next_question(conn, current_thread_id, session)
-    if not question_message:
-        response = _insert_message(conn, current_thread_id, "assistant", "text", "我先记下这条待确认信息，稍后再问你。")
-        return _result(conn, current_thread_id, status="waiting", message=response, proposal=active_proposal, fallback=fallback)
-    return _result(conn, current_thread_id, status="awaiting_confirmation", message=question_message, proposal=active_proposal, fallback=fallback)
