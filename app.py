@@ -888,14 +888,8 @@ async def lifespan(_app: FastAPI):
             )
         except Exception:
             log.exception("OpenRouter clients failed to initialize")
-    # Jobs are durable; a process restart must not strand a queued or
-    # interrupted submission. Recovery runs off the event loop and uses the
-    # same small job executor as new submissions.
-    asyncio.create_task(asyncio.to_thread(
-        recover_inbox_jobs,
-        db_factory=db,
-        process_job=_process_v2_inbox_job,
-    ))
+    # Inbox jobs are executed by the dedicated worker service so Web requests
+    # and graceful API shutdown are never coupled to a long LLM call.
     yield
 
 
@@ -1734,7 +1728,7 @@ def _v2_page(name: str) -> FileResponse:
     path = V2_TEMPLATE_DIR / name
     if not path.is_file():
         raise HTTPException(404, "V2 page is not installed")
-    return FileResponse(path, media_type="text/html")
+    return FileResponse(path, media_type="text/html", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/inbox")
@@ -1781,7 +1775,6 @@ def v2_inbox_message(
                 channel=payload.channel,
                 idempotency_key=idempotency_key,
             )
-        background_tasks.add_task(_process_v2_inbox_job, int(job["id"]))
         return JSONResponse(
             status_code=202,
             content=json_safe({
@@ -1843,7 +1836,6 @@ def v2_retry_inbox_job(
                 return json_safe({"job_id": int(job["id"]), "thread_id": int(job["thread_id"]), "status": "completed"})
             if job["status"] not in {"queued", "processing"}:
                 raise HTTPException(409, "Only a failed V2 Inbox job can be retried")
-    background_tasks.add_task(_process_v2_inbox_job, int(job["id"]))
     return JSONResponse(
         status_code=202,
         content=json_safe({

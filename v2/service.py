@@ -273,6 +273,22 @@ def list_unfinished_job_ids(conn) -> list[int]:
         return [int(row["id"]) for row in cur.fetchall()]
 
 
+def list_queued_job_ids(conn, *, limit: int = 1) -> list[int]:
+    """Return a bounded FIFO slice for the dedicated Inbox worker."""
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id FROM v2_inbox_processing_jobs
+            WHERE status='queued'
+            ORDER BY id
+            LIMIT %s
+            """,
+            (max(1, int(limit)),),
+        )
+        return [int(row["id"]) for row in cur.fetchall()]
+
+
 def list_threads(conn, *, limit: int = 30) -> list[dict]:
     with conn.cursor() as cur:
         cur.execute(

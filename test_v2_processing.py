@@ -40,8 +40,7 @@ class V2InboxProcessingTest(unittest.TestCase):
         self.assertEqual(result.status_code, 202)
         self.assertEqual(response_json(result), {"thread_id": 7, "job_id": 41, "status": "queued"})
         process.assert_not_called()
-        self.assertEqual(len(tasks.tasks), 1)
-        self.assertIs(tasks.tasks[0].func, process)
+        self.assertEqual(len(tasks.tasks), 0)
 
     def test_submit_passes_idempotency_key_to_durable_enqueue(self):
         job = {"id": 42, "thread_id": 7, "status": "queued"}
@@ -149,7 +148,7 @@ class V2InboxProcessingTest(unittest.TestCase):
         self.assertEqual(result.status_code, 202)
         self.assertEqual(response_json(result)["job_id"], 57)
         enqueue.assert_not_called()
-        self.assertEqual(len(tasks.tasks), 1)
+        self.assertEqual(len(tasks.tasks), 0)
 
     def test_same_idempotency_key_returns_same_job(self):
         job = {"id": 58, "thread_id": 7, "status": "queued"}

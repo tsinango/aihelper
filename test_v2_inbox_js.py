@@ -325,7 +325,7 @@ const THREAD_SNAPSHOT = {
   T.openThread(9);
   await sleep(0);
   const refreshedWithJob = pending().find(call => call.url === '/api/v2/inbox/threads/9');
-  answer(refreshedWithJob, {thread: {id: 9}, messages: [], jobs: [{job_id: 200, thread_id: 9, status: 'processing'}]});
+  answer(refreshedWithJob, {thread: {id: 9}, messages: [], jobs: [{id: 200, thread_id: 9, status: 'processing'}]});
   await sleep(0);
   ok(T.state.activeJob && T.state.activeJob.job_id === 200, 'refresh resumes an unfinished processing job');
   ok(byId['thinking'].hidden === false, 'refresh shows processing state');

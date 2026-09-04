@@ -139,7 +139,7 @@
     }
 
     async function send(content) {
-      const button = $('#composer button');
+      const button = document.querySelector('#composer button');
       button.disabled = true;
       try {
         const body = {content};

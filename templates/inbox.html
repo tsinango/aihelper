@@ -40,7 +40,10 @@
     .empty strong{display:block;color:var(--text);font-size:16px;margin-bottom:5px}
     .message-row{display:flex;margin:0 0 14px}
     .message-row.user{justify-content:flex-end}
-    .bubble{max-width:85%;padding:10px 13px;border-radius:14px;background:#fff;border:1px solid var(--line);white-space:pre-wrap;overflow-wrap:anywhere}
+    .message-row > div{width:100%;min-width:0;display:flex;flex-direction:column}
+    .message-row.user > div{align-items:flex-end}
+    .message-row.assistant > div{align-items:flex-start}
+    .bubble{width:fit-content;max-width:85%;padding:10px 13px;border-radius:14px;background:#fff;border:1px solid var(--line);white-space:pre-wrap;overflow-wrap:anywhere}
     .message-row.user .bubble{background:var(--blue);border-color:var(--blue);color:#fff;border-bottom-right-radius:4px}
     .message-row.assistant .bubble{border-bottom-left-radius:4px}
     .message-meta{font-size:11px;color:var(--muted);margin:0 5px 4px}
@@ -121,7 +124,7 @@
       <button id="chat-error-retry" type="button">重试</button>
     </div>
     <form id="composer" class="composer">
-      <textarea id="message-input" rows="1" placeholder="输入知识、粘贴 Telegram 对话，或告诉我你想补充什么……" aria-label="消息"></textarea>
+      <textarea id="message-input" rows="1" placeholder="输入知识、粘贴对话，或告诉我想补充什么……" aria-label="消息"></textarea>
       <button id="send-button" class="primary" type="submit">发送</button>
     </form>
     <p id="composer-note" class="composer-note">Enter 发送 · Shift + Enter 换行</p>
@@ -467,20 +470,31 @@
       state.pollTimer = 0;
     }
 
+    function normalizeJob(job) {
+      if (!job || typeof job !== 'object') return null;
+      const jobId = job.job_id != null ? job.job_id : job.id;
+      if (jobId == null || String(jobId).trim() === '') return null;
+      return {...job, job_id: jobId};
+    }
+
     function scheduleJobPoll(delay = POLL_INTERVAL_MS) {
       clearPollTimer();
-      if (!state.activeJob || state.pollFailures >= MAX_POLL_FAILURES) return;
+      if (!normalizeJob(state.activeJob)) return;
       state.pollTimer = setTimeout(() => pollJob(state.activeJob), delay);
     }
 
     function scheduleReconnect() {
-      const exponent = Math.max(0, state.pollFailures - 1);
+      const exponent = Math.min(6, Math.max(0, state.pollFailures - 1));
       const delay = Math.min(POLL_RETRY_MAX_MS, POLL_RETRY_BASE_MS * (2 ** exponent));
       scheduleJobPoll(delay);
     }
 
     async function pollJob(job) {
-      if (!job || !state.activeJob || String(job.job_id) !== String(state.activeJob.job_id)) return;
+      const normalized = normalizeJob(job);
+      const active = normalizeJob(state.activeJob);
+      if (!normalized || !active || String(normalized.job_id) !== String(active.job_id)) return;
+      job = normalized;
+      state.activeJob = active;
       showThinking(job.status);
       try {
         const data = await api(`/api/v2/inbox/jobs/${encodeURIComponent(job.job_id)}`, {}, POLL_TIMEOUT_MS);
@@ -516,18 +530,18 @@
             refreshThreads();
             renderThreads();
           } catch (_) {
-            state.pollFailures += 1;
+            state.pollFailures = Math.min(MAX_POLL_FAILURES, state.pollFailures + 1);
             setRetryLabel('重新连接');
             showChatError('连接暂时中断，正在重新连接……');
             scheduleReconnect();
           }
         }
       } catch (_) {
-        state.pollFailures += 1;
+        state.pollFailures = Math.min(MAX_POLL_FAILURES, state.pollFailures + 1);
         setRetryLabel('重新连接');
         showChatError(state.pollFailures < MAX_POLL_FAILURES
           ? '连接暂时中断，正在重新连接……'
-          : '连接暂时中断，刷新页面后会继续查看处理进度。');
+          : '连接暂时中断，后台任务仍在继续，正在自动重试……');
         scheduleReconnect();
       }
     }
@@ -535,7 +549,12 @@
     function resumeActiveJob(jobs) {
       const active = Array.isArray(jobs) ? jobs.find(job => ['queued', 'processing'].includes(job.status)) : null;
       if (!active) return;
-      state.activeJob = active;
+      const normalized = normalizeJob(active);
+      if (!normalized) {
+        showChatError('任务状态缺少编号，请刷新后重试。');
+        return;
+      }
+      state.activeJob = normalized;
       state.pollFailures = 0;
       clearChatError();
       showThinking(active.status);
@@ -545,17 +564,20 @@
     }
 
     async function retryJob(job) {
-      if (!job || state.sending) return;
+      const normalized = normalizeJob(job);
+      if (!normalized || state.sending) return;
       clearChatError();
       state.failedJob = null;
-      state.activeJob = {job_id: job.job_id, thread_id: job.thread_id, status: 'queued'};
+      state.activeJob = {...normalized, status: 'queued'};
       state.pollFailures = 0;
       showThinking('queued');
       renderThreads();
       updateComposerDisabled();
       try {
-        const data = await api(`/api/v2/inbox/jobs/${encodeURIComponent(job.job_id)}/retry`, {method: 'POST'}, POLL_TIMEOUT_MS);
-        state.activeJob = data;
+        const data = await api(`/api/v2/inbox/jobs/${encodeURIComponent(normalized.job_id)}/retry`, {method: 'POST'}, POLL_TIMEOUT_MS);
+        const retryJobData = normalizeJob(data);
+        if (!retryJobData) throw new Error('服务未返回有效任务编号，请重试。');
+        state.activeJob = retryJobData;
         updateComposerDisabled();
         pollJob(state.activeJob);
       } catch (error) {
@@ -601,11 +623,19 @@
         state.sending = false;
         updateComposerDisabled();
       }
+      const activeJob = normalizeJob(data);
+      if (!activeJob) {
+        state.failedContent = content;
+        hideThinking();
+        setRetryLabel('重试');
+        showChatError('服务未返回有效任务编号，请重试。');
+        return;
+      }
       if (data && data.thread_id) {
         state.threadId = data.thread_id;
         writeStoredThreadId(data.thread_id);
       }
-      state.activeJob = data;
+      state.activeJob = activeJob;
       state.pollFailures = 0;
       showThinking(data.status || 'queued');
       renderThreads();
