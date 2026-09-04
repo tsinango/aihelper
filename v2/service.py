@@ -1,4 +1,4 @@
-"""Persistence helpers for the Phase 1 V2 Inbox skeleton.
+"""Persistence helpers for the Phase 2 V2 Inbox data layer.
 
 This module is intentionally boring: SQL is visible, transactions belong to
 the caller, and the V2 tables are never mixed with V1 candidate/review tables.
@@ -18,7 +18,13 @@ def _dict(row: Any) -> dict:
     return dict(row) if row is not None else {}
 
 
-def create_thread(conn, *, channel: str = "inbox", mode: str = "learn") -> dict:
+def create_thread(
+    conn,
+    *,
+    channel: str = "inbox",
+    mode: str = "learn",
+    external_thread_id: str | None = None,
+) -> dict:
     origin = {
         "inbox": "web",
         "chat": "web",
@@ -26,15 +32,19 @@ def create_thread(conn, *, channel: str = "inbox", mode: str = "learn") -> dict:
         "import": "import",
     }.get(channel, "web")
     thread_type = "learning" if mode == "learn" else "general"
+    external_thread_id = str(external_thread_id or "").strip() or None
     with conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO v2_inbox_threads(thread_type, origin, status)
-            VALUES(%s, %s, 'open')
+            INSERT INTO v2_inbox_threads(thread_type, origin, status, external_thread_id)
+            VALUES(%s, %s, 'open', %s)
+            ON CONFLICT (origin, external_thread_id)
+              WHERE external_thread_id IS NOT NULL
+              DO UPDATE SET updated_at=CURRENT_TIMESTAMP
             RETURNING id, origin AS channel, status, thread_type AS mode,
-                      created_at, updated_at
+                      external_thread_id, created_at, updated_at
             """,
-            (thread_type, origin),
+            (thread_type, origin, external_thread_id),
         )
         return _dict(cur.fetchone())
 
@@ -44,7 +54,7 @@ def get_thread(conn, thread_id: int) -> dict:
         cur.execute(
             """
             SELECT id, origin AS channel, status, thread_type AS mode,
-                   created_at, updated_at
+                   external_thread_id, created_at, updated_at
             FROM v2_inbox_threads
             WHERE id=%s
             """,
@@ -56,8 +66,22 @@ def get_thread(conn, thread_id: int) -> dict:
     return _dict(row)
 
 
-def ensure_thread(conn, thread_id: int | None, *, channel: str = "inbox", mode: str = "learn") -> dict:
-    return get_thread(conn, thread_id) if thread_id is not None else create_thread(conn, channel=channel, mode=mode)
+def ensure_thread(
+    conn,
+    thread_id: int | None,
+    *,
+    channel: str = "inbox",
+    mode: str = "learn",
+    external_thread_id: str | None = None,
+) -> dict:
+    if thread_id is not None:
+        return get_thread(conn, thread_id)
+    return create_thread(
+        conn,
+        channel=channel,
+        mode=mode,
+        external_thread_id=external_thread_id,
+    )
 
 
 def list_thread_messages(conn, thread_id: int) -> list[dict]:
@@ -85,7 +109,8 @@ def list_threads(conn, *, limit: int = 30) -> list[dict]:
         cur.execute(
             """
             SELECT t.id, t.origin AS channel, t.status,
-                   t.thread_type AS mode, t.created_at, t.updated_at,
+                   t.thread_type AS mode, t.external_thread_id,
+                   t.created_at, t.updated_at,
                    (SELECT m.content FROM v2_inbox_messages m
                     WHERE m.thread_id=t.id ORDER BY m.id DESC LIMIT 1) AS preview,
                    (SELECT count(*) FROM v2_inbox_messages m

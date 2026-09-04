@@ -23,8 +23,24 @@ class V2SkeletonTest(unittest.TestCase):
             self.assertIn(f"CREATE TABLE IF NOT EXISTS {table}", migration)
         for trust in ("official_source", "user_confirmed", "provisional", "conflicted"):
             self.assertIn(trust, migration)
+        self.assertIn("CHECK (trust <> 'conflicted' OR active = FALSE)", migration)
+        self.assertIn("REFERENCES v2_knowledge(id) ON DELETE RESTRICT", migration)
+        self.assertIn("relation = 'supports' AND source_role IN ('primary', 'supporting')", migration)
+        self.assertIn("relation = 'contradicts' AND source_role = 'contradicting'", migration)
+        self.assertIn("'active_inbox'", migration)
+        self.assertIn("ux_v2_learning_sessions_active_thread", migration)
+        self.assertIn("ux_v2_inbox_threads_external", migration)
+        self.assertNotRegex(migration, r"(?i)\b(?:DROP|ALTER)\s+TABLE\b")
         self.assertNotIn("CREATE TABLE IF NOT EXISTS dimension", migration.casefold())
         self.assertNotIn("CREATE TABLE IF NOT EXISTS ontology", migration.casefold())
+
+    def test_service_queries_match_thread_schema_and_are_idempotent(self):
+        service = (ROOT / "v2" / "service.py").read_text()
+        self.assertNotIn("FROM v2_inbox_threads\n            FROM v2_inbox_threads", service)
+        self.assertIn("external_thread_id", service)
+        self.assertIn("ON CONFLICT (origin, external_thread_id)", service)
+        self.assertIn("WHERE external_thread_id IS NOT NULL", service)
+        self.assertIn("RETURNING id, origin AS channel, status, thread_type AS mode", service)
 
     def test_v2_pages_and_routes_exist_without_replacing_v1(self):
         for page in ("inbox.html", "knowledge.html", "documents.html", "chat.html"):
