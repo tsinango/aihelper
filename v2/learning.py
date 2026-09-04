@@ -18,6 +18,7 @@ from llm import parse_json_response
 from v2.bulk import (
     classify_input_mode,
     deduplicate_knowledge,
+    extraction_coverage_is_complete,
     parse_batch_confirmation,
     requires_individual_confirmation,
     segment_bulk_text,
@@ -55,7 +56,7 @@ _BINARY_QUESTION_MARKERS = (
 UNDERSTANDING_SYSTEM_PROMPT = """
 你是一个产品知识学习助理。你正在和产品专家聊天，不是在维护数据库。
 从用户刚刚提供的文字中完整提炼所有原子事实，返回严格 JSON：
-{"facts":[{"title":"简短标题","content":"一个可独立确认的事实","entity_name":"明确型号或产品名，没有就空字符串","derived":false}]}
+{"facts":[{"title":"简短标题","content":"一个可独立确认的事实","entity_name":"明确型号或产品名，没有就空字符串","derived":false,"source_excerpt":"对应的连续原文片段"}],"coverage":{"complete":true,"claims":[{"text":"连续原文中的一个明确主张","fact_indexes":[0]}],"uncovered_claims":[]}}
 
 硬规则：
 - 每个 facts 项只能包含一个事实；型号、系列范围、hardware revision、firmware、条件、例外和否定事实必须拆成不同项。
@@ -69,6 +70,9 @@ UNDERSTANDING_SYSTEM_PROMPT = """
 - derived 只有在你确实做了原文之外的推断时才为 true；原文的忠实拆分或改写必须为 false。
 - 不要回答客户问题，不要使用训练知识，不要询问数据库字段或技术实现。
 - 只返回 JSON，不要 markdown，不要解释。
+- bulk 分段提取时，coverage 必须逐个列出所有明确主张；每个主张只能关联一个 fact，
+  每个 fact 都必须保留对应的连续原文 source_excerpt。无法覆盖全部主张时，complete 必须为 false，
+  并把遗漏写入 uncovered_claims。
 """.strip()
 
 
@@ -117,6 +121,7 @@ def _model_facts(
     context: list[dict] | None = None,
     *,
     max_tokens: int = 1600,
+    require_coverage: bool = False,
 ) -> tuple[list[dict], bool]:
     if llm_service is None:
         return _fallback_facts(content), True
@@ -149,8 +154,16 @@ def _model_facts(
                 "content": fact_content,
                 "entity_name": _clean(item.get("entity_name") or item.get("entity"), 500),
                 "derived": bool(item.get("derived") or item.get("inferred")),
+                "source_excerpt": _clean(item.get("source_excerpt"), 12000),
             })
         if facts:
+            if require_coverage and not extraction_coverage_is_complete(
+                content,
+                raw_facts,
+                parsed.get("coverage") if isinstance(parsed, dict) else None,
+            ):
+                log.warning("V2 bulk extraction coverage incomplete; segment remains failed")
+                return _fallback_facts(content), True
             return facts, False
     except Exception:
         log.exception("V2 learning understanding failed; keeping a provisional raw interpretation")
@@ -449,6 +462,7 @@ def _deduplicate_facts(facts: list[dict]) -> list[dict]:
             "entity_name": entity_name,
             "derived": bool(fact.get("derived")),
             "individual_confirmation": bool(fact.get("individual_confirmation")),
+            "source_excerpt": _clean(fact.get("source_excerpt"), 12000),
         })
     return result
 
@@ -1077,7 +1091,9 @@ def _learn_bulk_turn(
     for segment in segments:
         segment_number = int(segment["segment_no"])
         try:
-            facts, used_fallback = _model_facts(segment["text"], llm_service)
+            facts, used_fallback = _model_facts(
+                segment["text"], llm_service, require_coverage=True
+            )
             facts = _deduplicate_facts(facts)
         except Exception:
             log.exception("V2 bulk segment processing failed segment=%s", segment_number)

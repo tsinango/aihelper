@@ -36,28 +36,26 @@ class CompareAndAskTest(unittest.TestCase):
         return result, judge.calls[0][0]
 
     def test_new_has_no_candidate_id_or_question(self):
-        result, _ = self.call('{"decision":"NEW","knowledge_id":null,"question":null,"reason":"没有相关候选"}', candidates=[])
+        judge = FakeJudge('{"decision":"UNCLEAR","knowledge_id":null,"question":"是否还有其他模型？"}')
+        result = compare_and_ask(FACT, [], judge)
         self.assertEqual(result["decision"], "NEW")
         self.assertIsNone(result["knowledge_id"])
         self.assertIsNone(result["question"])
+        self.assertEqual(judge.calls, [])
 
     def test_vague_version_cannot_be_new_even_without_candidates(self):
         vague = {"title": "版本差异", "content": "F-X 新版和以前不一样", "entity_name": "F-X"}
-        result, _ = self.call(
-            '{"decision":"NEW","knowledge_id":null,"question":null,"reason":"没有候选"}',
-            fact=vague,
-            candidates=[],
-        )
+        judge = FakeJudge('{"decision":"NEW","knowledge_id":null,"question":null,"reason":"没有候选"}')
+        result = compare_and_ask(vague, [], judge)
         self.assertEqual(result["decision"], "UNCLEAR")
         self.assertIn("revision", result["question"])
+        self.assertEqual(judge.calls, [])
 
-        unclear, _ = self.call(
-            '{"decision":"UNCLEAR","knowledge_id":null,"question":"请说明具体产品信息？","reason":"不清楚"}',
-            fact=vague,
-            candidates=[],
-        )
+        unclear_judge = FakeJudge('{"decision":"UNCLEAR","knowledge_id":null,"question":"请说明具体产品信息？","reason":"不清楚"}')
+        unclear = compare_and_ask(vague, [], unclear_judge)
         self.assertEqual(unclear["decision"], "UNCLEAR")
         self.assertIn("硬件 revision", unclear["question"])
+        self.assertEqual(unclear_judge.calls, [])
 
     def test_uncertain_wording_cannot_be_confirmed(self):
         uncertain = {"title": "功能", "content": "F-X 可能支持声音检测", "entity_name": "F-X"}

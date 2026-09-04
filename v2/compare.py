@@ -316,6 +316,25 @@ def compare_and_ask(
         raise ValueError("max_tokens must be a positive integer")
     fact = normalized_facts[0]
     candidate_ids = {int(item["id"]) for item in candidates}
+    intrinsic_question = intrinsic_clarification_question(fact)
+    # Retrieval returning no related Knowledge is an ordinary, deterministic
+    # NEW case.  Do not spend an LLM call asking the model to invent a missing
+    # comparison target or an open-world follow-up question.  Intrinsic
+    # ambiguity remains a clarification, also without retrieval candidates.
+    if not candidates:
+        if intrinsic_question:
+            return {
+                "decision": "UNCLEAR",
+                "knowledge_id": None,
+                "question": intrinsic_question,
+                "reason": "新输入本身包含尚未明确的版本、差异或不确定表述",
+            }
+        return {
+            "decision": "NEW",
+            "knowledge_id": None,
+            "question": None,
+            "reason": "没有相关的既有 Knowledge",
+        }
     try:
         response = llm_service.judge(_build_messages(fact, candidates), max_tokens=max_tokens)
         parsed = parse_json_response(response)
@@ -323,7 +342,6 @@ def compare_and_ask(
         log.exception("V2 compare judge failed; failing closed")
         return _fail_closed(fact, "比较服务不可用或返回无法解析的结果")
     result = _validate_result(parsed, fact, candidate_ids)
-    intrinsic_question = intrinsic_clarification_question(fact)
     if intrinsic_question and result["decision"] == "UNCLEAR":
         result["question"] = intrinsic_question
         return result

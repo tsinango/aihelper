@@ -1,4 +1,5 @@
 import json
+import re
 import unittest
 from unittest.mock import patch
 
@@ -34,9 +35,59 @@ GUANLAN_ARCHITECTURE = (
 
 
 GUANLAN_21_ITEMS = "\n".join(
-    f"Номер {index}. Пакет алгоритмов Guanlan {index:02d}; тип: detection; модель: большой; статус: в разработке."
-    for index in range(1, 22)
-) + "\nОжидаются другие алгоритмы."
+    [
+        "Описание готовности алгоритмов к использованию (Hikvision / Guanlan)",
+        "Номер 1. Пакет «Распознавание лиц». Алгоритм: Распознавание лиц. Тип: Специальный алгоритм. Модель: Малая модель. Состояние: Готов к использованию.",
+        "Номер 2. Пакет «Защита периметра». Алгоритмы: Обнаружение вторжения, Обнаружение пересечения линии, Обнаружение входа в область, Обнаружение выхода из области. Тип: Специальный алгоритм. Модель: Большая модель. Состояние: Готов к использованию.",
+        "Номер 3. Пакет «Структуризация видео». Алгоритм: Структуризация видео. Тип: Специальный алгоритм. Модель: Малая модель. Состояние: Готов к использованию.",
+        "Номер 4. Пакет «Рабочие события (внутри помещения)». Алгоритмы: Детекция отсутствия сотрудника / детекция сна на рабочем месте, Детекция длительного нахождения в области, Подсчёт количества сотрудников с настройкой исключений, Детекция использования смартфона. Тип: Специальный алгоритм. Модель: Большая модель. Состояние: Готов к использованию.",
+        "Номер 5. Пакет «Детекция аномальных событий на улице». Алгоритмы: Детекция скоплений людей, Детекция бегущего человека, Детекция агрессивного поведения, Детекция упавшего человека. Тип: Специальный алгоритм. Модель: Большая модель. Состояние: Готов к использованию.",
+        "Номер 6. Пакет «Анализ трендов». Алгоритмы: Анализ скопления людей, Статистика подсчёта людей, Подсчёт людей в области. Тип: Специальный алгоритм. Модель: Большая модель. Состояние: Готов к использованию.",
+        "Номер 7. Алгоритм: Детекция оружия. Тип: AIOP. Модель: Большая модель. Состояние: Готов к использованию.",
+        "Номер 8. Алгоритм: Детекция СИЗ. Тип: AIOP. Модель: Большая модель. Состояние: Готов к использованию.",
+        "Номер 9. Алгоритм: Детекция дыма и огня. Тип: Специальный алгоритм. Модель: Большая модель. Состояние: Готов к использованию.",
+        "Номер 10. Алгоритм: Обнаружение праздношатания. Тип: Специальный алгоритм. Модель: Большая модель. Состояние: Готов к использованию.",
+        "Номер 11. Алгоритм: Блокировка пожарного выхода. Тип: Специальный алгоритм. Модель: Большая модель. Состояние: В процессе разработки.",
+        "Номер 12. Алгоритм: Детекция курения и использования мобильного телефона. Тип: Специальный алгоритм. Модель: Большая модель. Состояние: Готов к использованию.",
+        "Номер 13. Алгоритм: Детекция корзины покупок. Тип: AIOP. Модель: Большая модель. Состояние: Настраивается.",
+        "Номер 14. Алгоритм: Обнаружение оставленных товаров в корзине покупок. Тип: AIOP. Модель: Большая модель. Состояние: Настраивается.",
+        "Номер 15. Алгоритм: Обнаружение свободных мест на вертикальных полках. Тип: AIOP. Модель: Большая модель. Состояние: Настраивается.",
+        "Номер 16. Алгоритм: Обнаружение свободных мест в лотке с фруктами. Тип: AIOP. Модель: Большая модель. Состояние: Настраивается.",
+        "Номер 17. Алгоритм: Детекция действий с ценными товарами. Тип: AIOP. Модель: Большая модель. Состояние: В процессе разработки.",
+        "Номер 18. Алгоритм: Обнаружение открытия / закрытия дверцы холодильника. Тип: AIOP. Модель: Большая модель. Состояние: Настраивается.",
+        "Номер 19. Алгоритм: Обнаружение опасного поведения в кассовой зоне. Тип: AIOP. Модель: Большая модель. Состояние: Готов к использованию.",
+        "Номер 20. Алгоритм: Детекция несканированных товаров. Тип: AIOP. Модель: Большая модель. Состояние: В процессе разработки.",
+        "Номер 21. Алгоритм: Обнаружение сокрытия товара. Тип: Специальный алгоритм. Модель: Большая модель. Состояние: В процессе разработки.",
+        "В конце указано, что ожидаются другие алгоритмы.",
+        "Краткое резюме:",
+        "Большинство алгоритмов, связанных с безопасностью, контролем периметра, аналитикой поведения людей и базовыми детекциями, уже готовы к использованию. Алгоритмы для ритейла (корзины, полки, товары, холодильники) в основном находятся в статусе «Настраивается» или «В процессе разработки».",
+    ]
+)
+
+
+GUANLAN_21_EXPECTED = (
+    {"number": 1, "names": ("Распознавание лиц",), "type": "Специальный алгоритм", "model": "Малая модель", "status": "Готов к использованию"},
+    {"number": 2, "names": ("Защита периметра", "Обнаружение вторжения", "Обнаружение пересечения линии", "Обнаружение входа в область", "Обнаружение выхода из области"), "type": "Специальный алгоритм", "model": "Большая модель", "status": "Готов к использованию"},
+    {"number": 3, "names": ("Структуризация видео",), "type": "Специальный алгоритм", "model": "Малая модель", "status": "Готов к использованию"},
+    {"number": 4, "names": ("Рабочие события (внутри помещения)", "Детекция отсутствия сотрудника / детекция сна на рабочем месте", "Детекция длительного нахождения в области", "Подсчёт количества сотрудников с настройкой исключений", "Детекция использования смартфона"), "type": "Специальный алгоритм", "model": "Большая модель", "status": "Готов к использованию"},
+    {"number": 5, "names": ("Детекция аномальных событий на улице", "Детекция скоплений людей", "Детекция бегущего человека", "Детекция агрессивного поведения", "Детекция упавшего человека"), "type": "Специальный алгоритм", "model": "Большая модель", "status": "Готов к использованию"},
+    {"number": 6, "names": ("Анализ трендов", "Анализ скопления людей", "Статистика подсчёта людей", "Подсчёт людей в области"), "type": "Специальный алгоритм", "model": "Большая модель", "status": "Готов к использованию"},
+    {"number": 7, "names": ("Детекция оружия",), "type": "AIOP", "model": "Большая модель", "status": "Готов к использованию"},
+    {"number": 8, "names": ("Детекция СИЗ",), "type": "AIOP", "model": "Большая модель", "status": "Готов к использованию"},
+    {"number": 9, "names": ("Детекция дыма и огня",), "type": "Специальный алгоритм", "model": "Большая модель", "status": "Готов к использованию"},
+    {"number": 10, "names": ("Обнаружение праздношатания",), "type": "Специальный алгоритм", "model": "Большая модель", "status": "Готов к использованию"},
+    {"number": 11, "names": ("Блокировка пожарного выхода",), "type": "Специальный алгоритм", "model": "Большая модель", "status": "В процессе разработки"},
+    {"number": 12, "names": ("Детекция курения и использования мобильного телефона",), "type": "Специальный алгоритм", "model": "Большая модель", "status": "Готов к использованию"},
+    {"number": 13, "names": ("Детекция корзины покупок",), "type": "AIOP", "model": "Большая модель", "status": "Настраивается"},
+    {"number": 14, "names": ("Обнаружение оставленных товаров в корзине покупок",), "type": "AIOP", "model": "Большая модель", "status": "Настраивается"},
+    {"number": 15, "names": ("Обнаружение свободных мест на вертикальных полках",), "type": "AIOP", "model": "Большая модель", "status": "Настраивается"},
+    {"number": 16, "names": ("Обнаружение свободных мест в лотке с фруктами",), "type": "AIOP", "model": "Большая модель", "status": "Настраивается"},
+    {"number": 17, "names": ("Детекция действий с ценными товарами",), "type": "AIOP", "model": "Большая модель", "status": "В процессе разработки"},
+    {"number": 18, "names": ("Обнаружение открытия / закрытия дверцы холодильника",), "type": "AIOP", "model": "Большая модель", "status": "Настраивается"},
+    {"number": 19, "names": ("Обнаружение опасного поведения в кассовой зоне",), "type": "AIOP", "model": "Большая модель", "status": "Готов к использованию"},
+    {"number": 20, "names": ("Детекция несканированных товаров",), "type": "AIOP", "model": "Большая модель", "status": "В процессе разработки"},
+    {"number": 21, "names": ("Обнаружение сокрытия товара",), "type": "Специальный алгоритм", "model": "Большая модель", "status": "В процессе разработки"},
+)
 
 
 class FakeLLM:
@@ -47,6 +98,81 @@ class FakeLLM:
     def extract(self, messages, max_tokens=800):
         self.calls.append((messages, max_tokens))
         return self.response
+
+
+class GuanlanArchitectureExtractor(FakeLLM):
+    """Deterministic extraction response; assertions operate on parsed facts."""
+
+    def __init__(self):
+        super().__init__(json.dumps({
+            "facts": [
+                {"title": "架构层级", "content": "海康观澜大模型整体分为三级架构：基础大模型、行业大模型和任务模型。", "entity_name": "Guanlan"},
+                {"title": "基础大模型类型", "content": "基础大模型包括视觉大模型、语言大模型、多模态大模型、X光大模型、毫米波大模型和光纤大模型等。", "entity_name": "Guanlan"},
+                {"title": "基础大模型作用", "content": "基础大模型主要基于海量数据预训练，提供通用基础能力。", "entity_name": "Guanlan"},
+                {"title": "行业大模型构建", "content": "行业大模型在基础大模型的基础上，利用行业数据进一步预训练和微调而成。", "entity_name": "Guanlan"},
+                {"title": "任务模型定位", "content": "任务模型专注于某个具体的场景或业务，是大模型能力落地的重要方式。", "entity_name": "Guanlan"},
+                {"title": "任务模型示例", "content": "任务模型示例包括目标识别、周界防范和牲畜检测等。", "entity_name": "Guanlan"},
+            ]
+        }, ensure_ascii=False))
+
+
+class Guanlan21Extractor:
+    """Deterministic extraction mock for the verbatim Russian regression input."""
+
+    def __init__(self):
+        self.segments = []
+
+    def extract(self, messages, max_tokens=800):
+        source = messages[-1]["content"]
+        self.segments.append(source)
+        fields = []
+
+        package = re.search(r"Пакет «[^»]+»", source)
+        if package:
+            fields.append(package.group(0))
+        algorithms = re.search(r"Алгоритмы?:\s*(.+?)\. Тип:", source, re.S)
+        if algorithms:
+            label = "Алгоритмы" if "Алгоритмы:" in algorithms.group(0) else "Алгоритм"
+            fields.append(f"{label}: {algorithms.group(1).strip()}")
+        for pattern in (
+            r"Тип:\s*([^\.]+)",
+            r"Модель:\s*([^\.]+)",
+            r"Состояние:\s*([^\.]+)",
+        ):
+            match = re.search(pattern, source, re.S)
+            if match:
+                fields.append(match.group(0).strip())
+        if "ожидаются другие алгоритмы" in source.casefold():
+            match = re.search(r"В конце указано, что ожидаются другие алгоритмы\.", source, re.I)
+            if match:
+                fields.append(match.group(0))
+        summary = re.search(r"Краткое резюме:\n(.+)", source, re.S)
+        if summary:
+            fields.extend(
+                sentence.strip()
+                for sentence in re.split(r"(?<=[.!?])\s+", summary.group(1).strip())
+                if sentence.strip()
+            )
+        facts = [
+            {
+                "title": field[:80],
+                "content": field,
+                "entity_name": "Guanlan",
+                "source_excerpt": field,
+            }
+            for field in fields
+        ]
+        return json.dumps({
+            "facts": facts,
+            "coverage": {
+                "complete": True,
+                "claims": [
+                    {"text": field, "fact_indexes": [index]}
+                    for index, field in enumerate(fields)
+                ],
+                "uncovered_claims": [],
+            },
+        }, ensure_ascii=False)
 
 
 class _Cursor:
@@ -123,25 +249,21 @@ class BulkIntakeTest(unittest.TestCase):
         self.assertEqual(snapshot["failed_segment_numbers"], [3])
 
     def test_bulk_processes_every_numbered_segment(self):
-        segments = [{"segment_no": index, "text": f"Пакет алгоритмов Guanlan {index:02d}; тип: detection; модель: большой; статус: в разработке."} for index in range(1, 22)]
         batch = {"id": 70, "thread_id": 7, "total_segments": 21, "processed_segments": 0, "failed_segments": 0}
-
-        def extract(segment, _llm):
-            number = int(segment.rsplit("Guanlan ", 1)[-1].split(";", 1)[0])
-            return ([{"title": f"算法 {number}", "content": segment, "entity_name": "Guanlan"}], False)
+        extractor = Guanlan21Extractor()
+        planned_facts = []
 
         def plan(*_args, **kwargs):
+            planned_facts.append((kwargs["segment_no"], kwargs["fact"]))
             return {
                 "id": kwargs["segment_no"],
                 "status": "pending_confirmation",
                 "comparison_result": "NEW",
             }
 
-        with patch("v2.learning.segment_bulk_text", return_value=segments), patch(
-            "v2.learning._pause_pending_proposals"
-        ), patch("v2.learning._create_batch", return_value=batch), patch(
-            "v2.learning._model_facts", side_effect=extract
-        ) as model, patch("v2.learning._plan_fact", side_effect=plan) as plan_fact, patch(
+        with patch("v2.learning._pause_pending_proposals"), patch(
+            "v2.learning._create_batch", return_value=batch
+        ) as create, patch("v2.learning._plan_fact", side_effect=plan) as plan_fact, patch(
             "v2.learning._update_batch", return_value=batch
         ) as update, patch(
             "v2.learning._next_question", return_value=({"id": 80, "content": "批量确认"}, "批量确认", {"status": "pending_confirmation", "batch_id": 70})
@@ -153,19 +275,32 @@ class BulkIntakeTest(unittest.TestCase):
                 session={"id": 9},
                 evidence={"id": 10},
                 user_message={"id": 11},
-                llm_service=object(),
+                llm_service=extractor,
                 embedding_client=None,
                 had_pending=True,
             )
         self.assertEqual(output, {"status": "awaiting_confirmation"})
-        self.assertEqual(model.call_count, 21)
-        segment_inputs = [call.args[0] for call in model.call_args_list]
-        self.assertTrue(all("Пакет алгоритмов" in value for value in segment_inputs))
-        self.assertTrue(all("тип: detection" in value and "модель: большой" in value and "статус: в разработке" in value for value in segment_inputs))
-        self.assertEqual(plan_fact.call_count, 21)
+        self.assertEqual(len(extractor.segments), 21)
+        self.assertEqual(create.call_args.args[3], GUANLAN_21_ITEMS)
         self.assertEqual(update.call_args.kwargs["processed_segments"], 21)
         self.assertEqual(update.call_args.kwargs["failed_segments"], 0)
-        self.assertEqual(len(update.call_args.kwargs["clear_facts"]), 21)
+        self.assertEqual(plan_fact.call_count, len(planned_facts))
+        by_segment = {
+            number: "\n".join(fact["content"] for segment, fact in planned_facts if segment == number)
+            for number in range(1, 22)
+        }
+        for expected in GUANLAN_21_EXPECTED:
+            with self.subTest(number=expected["number"]):
+                extracted = by_segment[expected["number"]]
+                for name in expected["names"]:
+                    self.assertIn(name, extracted)
+                self.assertIn(expected["type"], extracted)
+                self.assertIn(expected["model"], extracted)
+                self.assertIn(expected["status"], extracted)
+        all_extracted = "\n".join(by_segment.values())
+        self.assertTrue(non_exhaustive_semantics(all_extracted))
+        self.assertIn("ожидаются другие алгоритмы", all_extracted.casefold())
+        self.assertGreater(len(update.call_args.kwargs["clear_facts"]), 21)
         result.assert_called_once()
 
     def test_pending_question_does_not_swallow_bulk_input(self):
@@ -225,7 +360,11 @@ class BulkIntakeTest(unittest.TestCase):
         self.assertIsNone(intrinsic_clarification_question({"content": GUANLAN_ARCHITECTURE}))
 
         class Judge:
+            def __init__(self):
+                self.calls = []
+
             def judge(self, *_args, **_kwargs):
+                self.calls.append(True)
                 return json.dumps({
                     "decision": "UNCLEAR",
                     "knowledge_id": None,
@@ -233,8 +372,11 @@ class BulkIntakeTest(unittest.TestCase):
                     "reason": "补全列表",
                 }, ensure_ascii=False)
 
-        result = compare_and_ask({"content": "基础大模型包括视觉、语言、多模态等。", "title": "类型", "entity_name": "Guanlan"}, [], Judge())
-        self.assertNotIn("其他模型", result["question"])
+        judge = Judge()
+        result = compare_and_ask({"content": "基础大模型包括视觉、语言、多模态等。", "title": "类型", "entity_name": "Guanlan"}, [], judge)
+        self.assertEqual(result["decision"], "NEW")
+        self.assertIsNone(result["question"])
+        self.assertEqual(judge.calls, [])
 
     def test_non_exhaustive_list_semantics(self):
         self.assertTrue(non_exhaustive_semantics("视觉、语言、多模态等"))
@@ -264,19 +406,78 @@ class BulkIntakeTest(unittest.TestCase):
         self.assertEqual([row["id"] for row in rows], [4, 6])
 
     def test_guanlan_architecture_regression(self):
-        terms = ("三级架构", "基础大模型", "行业大模型", "任务模型", "视觉大模型", "语言大模型", "多模态大模型", "X光大模型", "毫米波大模型", "光纤大模型", "预训练", "微调", "目标识别", "周界防范", "牲畜检测")
-        for term in terms:
-            self.assertIn(term, GUANLAN_ARCHITECTURE)
-        self.assertTrue(non_exhaustive_semantics(GUANLAN_ARCHITECTURE))
+        extractor = GuanlanArchitectureExtractor()
+        facts, fallback = _model_facts(GUANLAN_ARCHITECTURE, extractor)
+        self.assertFalse(fallback)
+        self.assertEqual(extractor.calls[0][0][-1]["content"], GUANLAN_ARCHITECTURE)
+        extracted = "\n".join(item["content"] for item in facts)
+        expected = (
+            "三级架构", "基础大模型、行业大模型和任务模型", "视觉大模型", "语言大模型",
+            "多模态大模型", "X光大模型", "毫米波大模型", "光纤大模型", "等",
+            "海量数据预训练", "通用基础能力", "行业数据进一步预训练和微调",
+            "具体的场景或业务", "目标识别", "周界防范", "牲畜检测",
+        )
+        for term in expected:
+            self.assertIn(term, extracted)
+        self.assertEqual(len(facts), 6)
+
+    def test_segment_with_multiple_facts_requires_complete_coverage(self):
+        incomplete = FakeLLM(json.dumps({
+            "facts": [{
+                "title": "算法包",
+                "content": "Пакет алгоритмов Guanlan 01",
+                "entity_name": "Guanlan",
+                "source_excerpt": "Пакет алгоритмов Guanlan 01",
+            }],
+            "coverage": {
+                "complete": True,
+                "claims": [{"text": "Пакет алгоритмов Guanlan 01", "fact_indexes": [0]}],
+                "uncovered_claims": [],
+            },
+        }, ensure_ascii=False))
+        facts, fallback = _model_facts(
+            "Пакет алгоритмов Guanlan 01; тип: detection; модель: большой; статус: в разработке.",
+            incomplete,
+            require_coverage=True,
+        )
+        self.assertTrue(fallback)
+        self.assertEqual(facts[0]["content"], "Пакет алгоритмов Guanlan 01; тип: detection; модель: большой; статус: в разработке.")
+
+    def test_segment_coverage_contract_accepts_all_explicit_fields(self):
+        source = "Пакет алгоритмов Guanlan 01; тип: detection; модель: большой; статус: в разработке."
+        facts = [
+            {"title": "пакет", "content": "Пакет алгоритмов Guanlan 01", "source_excerpt": "Пакет алгоритмов Guanlan 01"},
+            {"title": "тип", "content": "тип: detection", "source_excerpt": "тип: detection"},
+            {"title": "модель", "content": "модель: большой", "source_excerpt": "модель: большой"},
+            {"title": "статус", "content": "статус: в разработке", "source_excerpt": "статус: в разработке"},
+        ]
+        complete = FakeLLM(json.dumps({
+            "facts": facts,
+            "coverage": {
+                "complete": True,
+                "claims": [
+                    {"text": fact["source_excerpt"], "fact_indexes": [index]}
+                    for index, fact in enumerate(facts)
+                ],
+                "uncovered_claims": [],
+            },
+        }, ensure_ascii=False))
+        extracted, fallback = _model_facts(source, complete, require_coverage=True)
+        self.assertFalse(fallback)
+        self.assertEqual(len(extracted), 4)
 
     def test_guanlan_21_items_regression(self):
         segments = segment_bulk_text(GUANLAN_21_ITEMS)
         # The trailing non-numbered sentence is retained with item 21 rather
         # than silently dropped, so all source text has a processing owner.
         self.assertEqual(len(segments), 21)
-        self.assertIn("Ожидаются другие алгоритмы", segments[-1]["text"])
+        self.assertIn("ожидаются другие алгоритмы", segments[-1]["text"])
         self.assertEqual([item["segment_no"] for item in segments], list(range(1, 22)))
-        self.assertTrue(all("Пакет алгоритмов" in item["text"] for item in segments))
+        self.assertIn("Описание готовности алгоритмов", segments[0]["text"])
+        segmented_source = "\n".join(item["text"] for item in segments)
+        for expected in GUANLAN_21_EXPECTED:
+            for name in expected["names"]:
+                self.assertIn(name, segmented_source)
 
 
 if __name__ == "__main__":

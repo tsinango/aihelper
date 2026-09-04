@@ -96,6 +96,13 @@ def _numbered_segments(text: str) -> list[str]:
         start = match.end()
         end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
         value = text[start:end].strip()
+        # Keep a heading/preamble attached to the first numbered item.  The
+        # raw evidence remains the authoritative full payload, but every
+        # source character also needs a deterministic processing owner.
+        if index == 0:
+            prefix = text[:match.start()].strip()
+            if prefix:
+                value = f"{prefix}\n{value}" if value else prefix
         if value:
             result.append(value)
     return result
@@ -185,6 +192,85 @@ def coverage(
     }
 
 
+def minimum_explicit_claims(source: str) -> int:
+    """Estimate a lower bound for atomic claims in one extracted segment.
+
+    This is intentionally conservative and structural.  It is not a second
+    extractor: separators used by the source (labeled fields, semicolons,
+    lines, or sentence boundaries) only prevent a one-fact response from
+    being reported as complete when the segment visibly contains several
+    claims.
+    """
+
+    text = str(source or "").strip()
+    if not text:
+        return 0
+    labeled_fields = re.findall(
+        r"(?:^|[;；\n])\s*[^;；\n:：]{1,80}[：:]\s*[^;；\n]+",
+        text,
+    )
+    separators = re.split(r"[;；\n]+", text)
+    structural_parts = [part.strip() for part in separators if part.strip()]
+    sentence_count = len(re.findall(r"[。！？!?]", text))
+    return max(1, len(labeled_fields), len(structural_parts), sentence_count)
+
+
+def extraction_coverage_is_complete(
+    source: str,
+    raw_facts: Iterable[Mapping[str, Any]],
+    coverage_data: Mapping[str, Any] | None,
+) -> bool:
+    """Validate the small extraction coverage contract used for bulk calls.
+
+    A model response is not considered processed merely because it contains a
+    fact.  It must explicitly enumerate covered source claims, attach each
+    claim to exactly one extracted fact, preserve a source excerpt, and say
+    that there are no uncovered claims.  The structural lower bound catches
+    the common failure where a multi-field segment returns its first fact and
+    incorrectly claims completion.
+    """
+
+    if not isinstance(coverage_data, Mapping):
+        return False
+    if coverage_data.get("complete") is not True:
+        return False
+    uncovered = coverage_data.get("uncovered_claims")
+    claims = coverage_data.get("claims")
+    if not isinstance(uncovered, list) or uncovered:
+        return False
+    if not isinstance(claims, list) or len(claims) < minimum_explicit_claims(source):
+        return False
+
+    facts = [dict(item) for item in raw_facts if isinstance(item, Mapping)]
+    if not facts or len(facts) < len(claims):
+        return False
+    source_text = str(source or "")
+    excerpts = []
+    for fact in facts:
+        excerpt = str(fact.get("source_excerpt") or "").strip()
+        if not excerpt or excerpt not in source_text:
+            return False
+        excerpts.append(excerpt)
+
+    seen_fact_indexes: set[int] = set()
+    for claim in claims:
+        if not isinstance(claim, Mapping):
+            return False
+        claim_text = str(claim.get("text") or claim.get("source_excerpt") or "").strip()
+        indexes = claim.get("fact_indexes")
+        if not claim_text or claim_text not in source_text:
+            return False
+        if not isinstance(indexes, list) or len(indexes) != 1:
+            return False
+        index = indexes[0]
+        if not isinstance(index, int) or isinstance(index, bool) or not 0 <= index < len(facts):
+            return False
+        if claim_text not in excerpts[index]:
+            return False
+        seen_fact_indexes.add(index)
+    return len(seen_fact_indexes) >= minimum_explicit_claims(source)
+
+
 def deduplicate_knowledge(items: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
     """Deduplicate summary rows by final Knowledge id, then by normalized text."""
 
@@ -257,9 +343,11 @@ __all__ = [
     "classify_input_mode",
     "detect_input_mode",
     "coverage",
+    "extraction_coverage_is_complete",
     "deduplicate_knowledge",
     "looks_like_bulk",
     "non_exhaustive_semantics",
+    "minimum_explicit_claims",
     "requires_individual_confirmation",
     "parse_batch_confirmation",
     "segment_bulk_text",
