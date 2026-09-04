@@ -135,9 +135,12 @@
     const SUBMIT_TIMEOUT_MS = 10000;
     const POLL_TIMEOUT_MS = 5000;
     const POLL_INTERVAL_MS = 2500;
+    const POLL_RETRY_BASE_MS = 2000;
+    const POLL_RETRY_MAX_MS = 10000;
     const MAX_POLL_FAILURES = 12;
+    const THINKING_SLOW_MS = 10000;
     const isCoarse = typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia('(pointer: coarse)').matches;
-    const state = {threads: [], threadId: null, lastMessages: [], inboxRequest: 0, threadRequest: 0, sending: false, failedContent: '', requestKey: '', activeJob: null, failedJob: null, pollTimer: 0, pollFailures: 0};
+    const state = {threads: [], threadId: null, lastMessages: [], inboxRequest: 0, threadRequest: 0, sending: false, failedContent: '', requestKey: '', activeJob: null, failedJob: null, pollTimer: 0, pollFailures: 0, thinkingStartedAt: 0, slowTimer: 0};
     const keyInput = $('api-key');
     if (keyInput) keyInput.value = getStoredKey();
 
@@ -248,6 +251,14 @@
       if (box) box.scrollTop = box.scrollHeight;
     }
 
+    function updateComposerDisabled() {
+      const disabled = state.sending || state.activeJob != null;
+      const sendButton = $('send-button');
+      const input = $('message-input');
+      if (sendButton) sendButton.disabled = disabled;
+      if (input) input.disabled = disabled;
+    }
+
     function renderThreads() {
       const box = $('thread-list');
       if (!box) return;
@@ -333,7 +344,7 @@
         }
         wrap.append(meta, bubble);
         const messageType = String(value(item, 'message_type', 'type')).toLowerCase();
-        if (index === lastIndex && !user && ['question', 'confirmation', 'clarification', 'batch_confirmation'].includes(messageType) && !state.sending) {
+        if (index === lastIndex && !user && ['question', 'confirmation', 'clarification', 'batch_confirmation'].includes(messageType) && !state.sending && !state.activeJob) {
           renderQuickReplies(wrap, messageType);
         }
         row.append(wrap);
@@ -398,18 +409,29 @@
     function showThinking(status = 'processing') {
       const box = $('thinking');
       const text = $('thinking-text');
-      const labels = {
-        queued: '已收到你的内容，正在排队处理……',
-        processing: '正在理解你的内容……',
-      };
-      if (text) text.textContent = labels[status] || labels.processing;
+      if (!state.thinkingStartedAt) state.thinkingStartedAt = Date.now();
+      if (text) text.textContent = '正在理解你的内容……';
       if (box) box.hidden = false;
+      updateComposerDisabled();
+      clearTimeout(state.slowTimer);
+      const elapsed = Date.now() - state.thinkingStartedAt;
+      const showSlowState = () => {
+        const slow = $('thinking-text');
+        if (state.activeJob && ['queued', 'processing'].includes(state.activeJob.status) && slow) {
+          slow.textContent = '正在查看已有知识，还需要一点时间……';
+        }
+      };
+      if (elapsed >= THINKING_SLOW_MS) showSlowState();
+      else state.slowTimer = setTimeout(showSlowState, THINKING_SLOW_MS - elapsed);
     }
 
     function hideThinking() {
       clearTimeout(state.slowTimer);
+      state.slowTimer = 0;
+      state.thinkingStartedAt = 0;
       const box = $('thinking');
       if (box) box.hidden = true;
+      updateComposerDisabled();
     }
 
     function showChatError(message) {
@@ -439,10 +461,16 @@
       state.pollTimer = 0;
     }
 
-    function scheduleJobPoll() {
+    function scheduleJobPoll(delay = POLL_INTERVAL_MS) {
       clearPollTimer();
       if (!state.activeJob || state.pollFailures >= MAX_POLL_FAILURES) return;
-      state.pollTimer = setTimeout(() => pollJob(state.activeJob), POLL_INTERVAL_MS);
+      state.pollTimer = setTimeout(() => pollJob(state.activeJob), delay);
+    }
+
+    function scheduleReconnect() {
+      const exponent = Math.max(0, state.pollFailures - 1);
+      const delay = Math.min(POLL_RETRY_MAX_MS, POLL_RETRY_BASE_MS * (2 ** exponent));
+      scheduleJobPoll(delay);
     }
 
     async function pollJob(job) {
@@ -456,6 +484,7 @@
         if (data.status === 'queued' || data.status === 'processing') {
           clearChatError();
           showThinking(data.status);
+          updateComposerDisabled();
           scheduleJobPoll();
           return;
         }
@@ -464,8 +493,9 @@
           state.failedJob = data;
           hideThinking();
           setRetryLabel('重新处理');
-          showChatError('处理失败');
+          showChatError(data.error_message || '处理失败');
           renderThreads();
+          updateComposerDisabled();
           return;
         }
         if (data.status === 'completed') {
@@ -480,9 +510,10 @@
             refreshThreads();
             renderThreads();
           } catch (_) {
+            state.pollFailures += 1;
             setRetryLabel('重新连接');
             showChatError('连接暂时中断，正在重新连接……');
-            scheduleJobPoll();
+            scheduleReconnect();
           }
         }
       } catch (_) {
@@ -491,7 +522,7 @@
         showChatError(state.pollFailures < MAX_POLL_FAILURES
           ? '连接暂时中断，正在重新连接……'
           : '连接暂时中断，刷新页面后会继续查看处理进度。');
-        scheduleJobPoll();
+        scheduleReconnect();
       }
     }
 
@@ -504,6 +535,7 @@
       showThinking(active.status);
       scheduleJobPoll();
       renderThreads();
+      updateComposerDisabled();
     }
 
     async function retryJob(job) {
@@ -514,10 +546,12 @@
       state.pollFailures = 0;
       showThinking('queued');
       renderThreads();
+      updateComposerDisabled();
       try {
         const data = await api(`/api/v2/inbox/jobs/${encodeURIComponent(job.job_id)}/retry`, {method: 'POST'}, POLL_TIMEOUT_MS);
         state.activeJob = data;
-        scheduleJobPoll();
+        updateComposerDisabled();
+        pollJob(state.activeJob);
       } catch (error) {
         state.activeJob = null;
         state.failedJob = job;
@@ -559,7 +593,7 @@
         return;
       } finally {
         state.sending = false;
-        if (sendButton) sendButton.disabled = false;
+        updateComposerDisabled();
       }
       if (data && data.thread_id) {
         state.threadId = data.thread_id;
@@ -569,6 +603,7 @@
       state.pollFailures = 0;
       showThinking(data.status || 'queued');
       renderThreads();
+      updateComposerDisabled();
       pollJob(state.activeJob);
       if (input && !isCoarse) input.focus();
     }
@@ -578,6 +613,7 @@
       state.activeJob = null;
       state.failedJob = null;
       state.failedContent = '';
+      updateComposerDisabled();
       state.threadId = null;
       writeStoredThreadId(null);
       renderMessages([]);

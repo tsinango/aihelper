@@ -119,7 +119,7 @@ const quickReplyTexts = () => {
   return null;
 };
 
-const exportLine = ';globalThis.__inboxTest = { state, sendMessage, openThread, loadInbox, renderMessages, quickReplyLabels, pollJob, resumeActiveJob, clearPollTimer };';
+const exportLine = ';globalThis.__inboxTest = { state, sendMessage, openThread, loadInbox, renderMessages, quickReplyLabels, pollJob, resumeActiveJob, clearPollTimer, showThinking, hideThinking };';
 eval(source + exportLine);
 const T = globalThis.__inboxTest;
 
@@ -159,6 +159,8 @@ const THREAD_SNAPSHOT = {
   ok(posts()[0].options.cache === 'no-store', 'POST uses no-store');
   ok(JSON.parse(posts()[0].options.body).content === '新知识', 'POST body carries the message');
   ok(String(JSON.parse(posts()[0].options.body).thread_id) === '7', 'POST keeps the current thread');
+  const firstRequestKey = posts()[0].options.headers['Idempotency-Key'];
+  ok(Boolean(firstRequestKey), 'POST sends an Idempotency-Key');
   ok(byId['thinking'].hidden === false, 'thinking indicator shown while waiting');
   ok(byId['thinking-text']._text.includes('已收到') || byId['thinking-text']._text.includes('正在理解'), 'thinking text explains the wait');
   ok(byId['send-button'].disabled === true, 'send button disabled while sending');
@@ -167,7 +169,26 @@ const THREAD_SNAPSHOT = {
   await sleep(0);
   const jobCall = pending().find(call => call.url === '/api/v2/inbox/jobs/101');
   ok(Boolean(jobCall), '202 response starts polling the durable job');
-  answer(jobCall, {job_id: 101, thread_id: 7, status: 'completed'});
+  answer(jobCall, {job_id: 101, thread_id: 7, status: 'queued'});
+  await sleep(0);
+  ok(T.state.activeJob.status === 'queued', 'queued job remains active');
+  ok(T.state.pollTimer !== 0, 'queued job schedules the next poll');
+  T.pollJob(T.state.activeJob);
+  await sleep(0);
+  const processingJobCall = pending().find(call => call.url === '/api/v2/inbox/jobs/101');
+  ok(Boolean(processingJobCall), 'queued job continues polling');
+  answer(processingJobCall, {job_id: 101, thread_id: 7, status: 'processing'});
+  await sleep(0);
+  ok(T.state.activeJob.status === 'processing', 'processing job remains active');
+  ok(T.state.pollTimer !== 0, 'processing job continues polling');
+  ok(byId['send-button'].disabled === true && byId['message-input'].disabled === true, 'composer stays disabled while job is active');
+  T.state.thinkingStartedAt = Date.now() - 10001;
+  T.showThinking('processing');
+  ok(byId['thinking-text']._text === '正在查看已有知识，还需要一点时间……', 'long processing gets the slow-state message');
+  T.pollJob(T.state.activeJob);
+  await sleep(0);
+  const completedJobCall = pending().find(call => call.url === '/api/v2/inbox/jobs/101');
+  answer(completedJobCall, {job_id: 101, thread_id: 7, status: 'completed'});
   await sleep(0);
   const refreshCall = pending().find(call => call.url === '/api/v2/inbox/threads/7');
   ok(Boolean(refreshCall), 'thread is refreshed after the job completes');
@@ -193,6 +214,7 @@ const THREAD_SNAPSHOT = {
   byId['composer']._listeners.submit[0]({ preventDefault() {} });
   await sleep(0);
   const failedPost = posts().pop();
+  const failedRequestKey = failedPost.options.headers['Idempotency-Key'];
   failedPost.reject(new TypeError('network down'));
   await sleep(0);
   ok(byId['chat-error'].hidden === false, 'chat error bubble shown on failure');
@@ -205,6 +227,7 @@ const THREAD_SNAPSHOT = {
   ok(posts().length === postCount + 1, 'retry issues a new POST');
   const retryPost = posts().pop();
   ok(JSON.parse(retryPost.options.body).content === '失败内容', 'retry resends the failed content');
+  ok(retryPost.options.headers['Idempotency-Key'] === failedRequestKey, 'transport retry reuses the same Idempotency-Key');
   answer(retryPost, {thread_id: 7, job_id: 102, status: 'queued'});
   await sleep(0);
   const retryJobGet = pending().find(call => call.url === '/api/v2/inbox/jobs/102');
@@ -227,12 +250,39 @@ const THREAD_SNAPSHOT = {
   });
   ok(dupRows.length === 1, 'retry does not duplicate the optimistic message');
 
+  // A real job failure is retried through the job endpoint only; the raw
+  // /messages submission is never posted a second time.
+  T.sendMessage('会失败的资料');
+  await sleep(0);
+  const failedJobSubmit = posts().filter(call => call.url === '/api/v2/inbox/messages').pop();
+  answer(failedJobSubmit, {thread_id: 9, job_id: 105, status: 'queued'});
+  await sleep(0);
+  const failedJobPoll = pending().find(call => call.url === '/api/v2/inbox/jobs/105');
+  answer(failedJobPoll, {job_id: 105, thread_id: 9, status: 'failed', error_message: 'OpenRouter timeout'});
+  await sleep(0);
+  ok(byId['chat-error-text']._text === 'OpenRouter timeout', 'failed job shows the actual job failure');
+  ok(T.state.activeJob === null && byId['send-button'].disabled === false, 'failed job stops polling and re-enables composer');
+  const messagePostCountBeforeJobRetry = calls.filter(call => call.url === '/api/v2/inbox/messages').length;
+  byId['chat-error-retry']._listeners.click[0]({ preventDefault() {} });
+  await sleep(0);
+  const jobRetryPost = pending().find(call => call.url === '/api/v2/inbox/jobs/105/retry');
+  ok(Boolean(jobRetryPost), 'failed Retry posts to the existing job endpoint');
+  ok(calls.filter(call => call.url === '/api/v2/inbox/messages').length === messagePostCountBeforeJobRetry,
+    'failed Retry does not repost the original input');
+  answer(jobRetryPost, {job_id: 105, thread_id: 9, status: 'queued'});
+  await sleep(0);
+  const retriedJobPoll = pending().find(call => call.url === '/api/v2/inbox/jobs/105');
+  answer(retriedJobPoll, {job_id: 105, thread_id: 9, status: 'completed'});
+  await sleep(0);
+  answer(pending().find(call => call.url === '/api/v2/inbox/threads/9'), {thread: {id: 9}, messages: []});
+  await sleep(0);
+
   // Duplicate-send guard.
   T.state.lastMessages = [];
   T.sendMessage('dup-a');
   T.sendMessage('dup-b');
   await sleep(0);
-  const dupPosts = posts().filter(call => {
+  const dupPosts = posts().filter(call => call.url === '/api/v2/inbox/messages').filter(call => {
     const body = JSON.parse(call.options.body);
     return body.content === 'dup-a' || body.content === 'dup-b';
   });
@@ -259,9 +309,9 @@ const THREAD_SNAPSHOT = {
   } catch (error) {
     crashed = error;
   }
-  ok(!crashed && posts().some(call => JSON.parse(call.options.body).content === 'safety-check'),
+  ok(!crashed && posts().filter(call => call.url === '/api/v2/inbox/messages').some(call => JSON.parse(call.options.body).content === 'safety-check'),
     'sendMessage survives a missing thinking element');
-  const safetyPost = posts().filter(call => JSON.parse(call.options.body).content === 'safety-check').pop();
+  const safetyPost = posts().filter(call => call.url === '/api/v2/inbox/messages').filter(call => JSON.parse(call.options.body).content === 'safety-check').pop();
   answer(safetyPost, {thread_id: 9, job_id: 104, status: 'queued'});
   await sleep(0);
   answer(pending().find(call => call.url === '/api/v2/inbox/jobs/104'), {job_id: 104, thread_id: 9, status: 'completed'});
@@ -272,7 +322,11 @@ const THREAD_SNAPSHOT = {
 
   // A refreshed thread advertises unfinished durable work and resumes it;
   // a temporary polling outage never creates another POST.
-  T.resumeActiveJob([{job_id: 200, thread_id: 9, status: 'processing'}]);
+  T.openThread(9);
+  await sleep(0);
+  const refreshedWithJob = pending().find(call => call.url === '/api/v2/inbox/threads/9');
+  answer(refreshedWithJob, {thread: {id: 9}, messages: [], jobs: [{job_id: 200, thread_id: 9, status: 'processing'}]});
+  await sleep(0);
   ok(T.state.activeJob && T.state.activeJob.job_id === 200, 'refresh resumes an unfinished processing job');
   ok(byId['thinking'].hidden === false, 'refresh shows processing state');
   const postsBeforePollFailure = posts().length;
@@ -285,6 +339,7 @@ const THREAD_SNAPSHOT = {
   ok(posts().length === postsBeforePollFailure, 'temporary polling failure does not create duplicate input');
   T.clearPollTimer();
   T.state.activeJob = null;
+  T.hideThinking();
 
   // Drain any fire-and-forget refresh fetches so their timeout timers clear.
   answerAll({ summary: {}, threads: [] });
