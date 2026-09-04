@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections import defaultdict
 from typing import Any
 
 
@@ -410,7 +411,7 @@ def list_knowledge(conn, *, limit: int = 100) -> list[dict]:
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT k.id, k.title, k.content, k.entity_name, k.trust,
+            SELECT k.id, k.title, k.content, k.entity_name, k.entity_id, k.trust,
                    k.active, k.created_at, k.updated_at,
                    count(s.raw_evidence_id) AS source_count
             FROM v2_knowledge k
@@ -423,6 +424,93 @@ def list_knowledge(conn, *, limit: int = 100) -> list[dict]:
             (limit,),
         )
         return [_dict(row) for row in cur.fetchall()]
+
+
+def list_knowledge_for_entity(conn, entity_id: int, *, limit: int = 100) -> list[dict]:
+    """Return facts linked to one entity without changing the fact layer."""
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT k.id, k.title, k.content, k.entity_name, k.entity_id, k.trust,
+                   k.active, k.created_at, k.updated_at,
+                   count(s.raw_evidence_id) AS source_count
+            FROM v2_knowledge k
+            LEFT JOIN v2_knowledge_sources s ON s.knowledge_id=k.id
+            WHERE k.active=TRUE AND k.entity_id=%s
+            GROUP BY k.id
+            ORDER BY k.updated_at DESC, k.id DESC
+            LIMIT %s
+            """,
+            (int(entity_id), limit),
+        )
+        return [_dict(row) for row in cur.fetchall()]
+
+
+def list_entity_tree(conn) -> dict:
+    """Build a small read-only tree for the Knowledge page.
+
+    Organization review is local; this read endpoint may assemble the whole
+    display tree because it does not call an LLM or mutate any relation.
+    """
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT e.id, e.name, e.entity_type, e.active,
+                   e.created_at, e.updated_at, count(k.id) AS knowledge_count
+            FROM v2_entities e
+            LEFT JOIN v2_knowledge k
+              ON k.entity_id=e.id AND k.active=TRUE
+            WHERE e.active=TRUE
+            GROUP BY e.id
+            ORDER BY lower(e.name), e.id
+            """
+        )
+        entities = [_dict(row) for row in cur.fetchall()]
+        cur.execute(
+            """
+            SELECT id, parent_entity_id, child_entity_id, relation_type,
+                   source_id, provenance, provenance_kind, active,
+                   created_at, updated_at
+            FROM v2_entity_relations
+            WHERE active=TRUE
+            ORDER BY parent_entity_id, child_entity_id, id
+            """
+        )
+        relations = [_dict(row) for row in cur.fetchall()]
+
+    nodes = {
+        int(entity["id"]): {
+            "id": int(entity["id"]),
+            "name": entity["name"],
+            "entity_type": entity["entity_type"],
+            "knowledge_count": int(entity.get("knowledge_count") or 0),
+            "children": [],
+        }
+        for entity in entities
+    }
+    children: dict[int, list[int]] = defaultdict(list)
+    parents: dict[int, list[int]] = defaultdict(list)
+    for relation in relations:
+        parent_id = int(relation["parent_entity_id"])
+        child_id = int(relation["child_entity_id"])
+        if parent_id not in nodes or child_id not in nodes:
+            continue
+        children[parent_id].append(child_id)
+        parents[child_id].append(parent_id)
+
+    def render(entity_id: int, path: frozenset[int] = frozenset()) -> dict:
+        if entity_id in path:
+            return dict(nodes[entity_id], children=[])
+        node = dict(nodes[entity_id])
+        node["children"] = [render(child_id, path | {entity_id}) for child_id in children.get(entity_id, [])]
+        return node
+
+    root_ids = [entity_id for entity_id in nodes if not parents.get(entity_id)]
+    roots = [render(entity_id) for entity_id in root_ids if children.get(entity_id)]
+    unorganized = [render(entity_id) for entity_id in root_ids if not children.get(entity_id)]
+    return {"roots": roots, "unorganized": unorganized}
 
 
 def list_documents(conn, *, limit: int = 100) -> list[dict]:

@@ -51,6 +51,8 @@ from v2.service import (
     json_safe,
     list_documents,
     list_knowledge,
+    list_knowledge_for_entity,
+    list_entity_tree,
     thread_response,
     worker_health,
 )
@@ -919,11 +921,15 @@ def ready():
                 SELECT to_regclass('public.questions') AS questions,
                        to_regclass('public.v2_knowledge') AS v2_knowledge,
                        to_regclass('public.v2_inbox_processing_jobs') AS jobs,
-                       to_regclass('public.v2_inbox_workers') AS workers
+                       to_regclass('public.v2_inbox_workers') AS workers,
+                       to_regclass('public.v2_entities') AS entities,
+                       to_regclass('public.v2_entity_relations') AS entity_relations
                 """
             )
             schema = cur.fetchone()
-            if not schema or not all(schema.get(name) for name in ("questions", "v2_knowledge", "jobs", "workers")):
+            if not schema or not all(schema.get(name) for name in (
+                "questions", "v2_knowledge", "jobs", "workers", "entities", "entity_relations",
+            )):
                 return _ready_failure("schema_unavailable")
             worker = worker_health(conn)
     except Exception:
@@ -1874,11 +1880,22 @@ def v2_inbox_thread(thread_id: int, x_api_key: str | None = Header(None)):
 
 
 @app.get("/api/v2/knowledge")
-def v2_knowledge(x_api_key: str | None = Header(None)):
+def v2_knowledge(
+    entity_id: int | None = Query(default=None, gt=0),
+    x_api_key: str | None = Header(None),
+):
     auth(x_api_key)
     with db() as conn:
-        items = list_knowledge(conn)
-    return json_safe({"items": items, "total": len(items)})
+        items = list_knowledge_for_entity(conn, entity_id) if entity_id is not None else list_knowledge(conn)
+        tree = list_entity_tree(conn)
+    return json_safe({"items": items, "total": len(items), "tree": tree})
+
+
+@app.get("/api/v2/entities/tree")
+def v2_entity_tree(x_api_key: str | None = Header(None)):
+    auth(x_api_key)
+    with db() as conn:
+        return json_safe(list_entity_tree(conn))
 
 
 @app.get("/api/v2/documents")

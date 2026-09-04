@@ -574,6 +574,72 @@ def _update_proposal(
     return dict(row)
 
 
+def _organization_review_context(conn, knowledge: dict) -> dict:
+    """Add immutable source wording needed for explicit local organization.
+
+    The fact row may contain a single atomic paraphrase after extraction while
+    its accepted raw evidence contains the explicit model-to-series sentence.
+    Read that source text for this Knowledge item only; never rewrite the fact.
+    """
+
+    context = dict(knowledge)
+    knowledge_id = knowledge.get("id")
+    if knowledge_id is None:
+        return context
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT e.content
+            FROM v2_knowledge_sources s
+            JOIN v2_raw_evidence e ON e.id=s.raw_evidence_id
+            WHERE s.knowledge_id=%s AND s.active=TRUE
+            ORDER BY s.id
+            """,
+            (int(knowledge_id),),
+        )
+        source_texts = [str(row["content"] or "") for row in cur.fetchall()]
+    if source_texts:
+        context["content"] = "\n".join(
+            [str(knowledge.get("content") or "")] + source_texts
+        )
+    return context
+
+
+def _run_local_organization_review(conn, knowledge: dict) -> dict:
+    """Best-effort organization after a fact is durably confirmed.
+
+    Organization is deliberately isolated behind a savepoint.  A malformed
+    relation, missing additive schema, or any other organization failure must
+    not turn a successful Knowledge confirmation into a failed learning turn.
+    """
+
+    try:
+        from v2.organization import (
+            extract_explicit_chain,
+            local_organization_review,
+        )
+
+        transaction = conn.transaction() if callable(getattr(conn, "transaction", None)) else nullcontext()
+        with transaction:
+            context = _organization_review_context(conn, knowledge)
+            return local_organization_review(
+                conn,
+                context,
+                explicit_chain=extract_explicit_chain(context),
+            )
+    except Exception:
+        log.exception(
+            "V2 local organization review failed knowledge_id=%s",
+            knowledge.get("id"),
+        )
+        return {
+            "action": "UNCLEAR",
+            "entity": None,
+            "relations": [],
+            "reason": "organization review failed; Knowledge was retained",
+        }
+
+
 def _confirm(
     conn,
     proposal: dict,
@@ -633,6 +699,7 @@ def _confirm(
         " ".join(filter(None, (knowledge.get("entity_name"), knowledge.get("title"), knowledge.get("content")))),
         embedder=embedding_client,
     )
+    _run_local_organization_review(conn, knowledge)
     return knowledge
 
 

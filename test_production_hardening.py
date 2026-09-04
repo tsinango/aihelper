@@ -49,7 +49,11 @@ class ProductionHardeningTest(unittest.TestCase):
             self.assertEqual(app.health(), {"status": "ok", "service": "aihelper"})
 
     def test_ready_reports_worker_unavailable_without_secrets(self):
-        schema = {"questions": "questions", "v2_knowledge": "v2_knowledge", "jobs": "jobs", "workers": "workers"}
+        schema = {
+            "questions": "questions", "v2_knowledge": "v2_knowledge", "jobs": "jobs",
+            "workers": "workers", "entities": "v2_entities",
+            "entity_relations": "v2_entity_relations",
+        }
         with patch("app.db", return_value=_ConnectionContext(row=schema)), patch(
             "app.worker_health", return_value={"worker_name": "aihelper-inbox-worker", "healthy": False}
         ), patch.object(app, "embedder", object()), patch.object(app, "llm", object()):

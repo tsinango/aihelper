@@ -170,6 +170,39 @@ class LearningLoopTest(unittest.TestCase):
         self.assertTrue(any("source_kind, relation" in query and "user_confirmation" in str(params) for query, params in conn.executed))
         self.assertTrue(any("SET status=%s" in query and params[0] == "confirmed" for query, params in conn.executed))
 
+    def test_knowledge_save_survives_org_review_failure(self):
+        conn = FakeConnection([{
+            "id": 20,
+            "title": "高度",
+            "content": "F-NR-208E/2 是 1U",
+            "entity_name": "F-NR-208E/2",
+            "trust": "user_confirmed",
+            "active": True,
+        }, {
+            "id": 30,
+            "thread_id": 7,
+            "source_message_id": 11,
+            "question_message_id": 12,
+            "fact_text": "高度",
+            "entity_name": "F-NR-208E/2",
+            "proposed_trust": "provisional",
+            "status": "confirmed",
+            "confirmed_knowledge_id": 20,
+            "resolution_message_id": 12,
+        }])
+        with patch(
+            "v2.organization.local_organization_review",
+            side_effect=RuntimeError("organization unavailable"),
+        ):
+            knowledge = _confirm(
+                conn,
+                {"id": 30, "confirmed_knowledge_id": 20},
+                {"id": 11, "content": "对"},
+                {"id": 12, "content": "对"},
+            )
+        self.assertEqual(knowledge["trust"], "user_confirmed")
+        self.assertTrue(any("SET trust=CASE" in query for query, _ in conn.executed))
+
     def test_unknown_and_skip_are_legal_without_reasking_same_proposal(self):
         for answer, expected in (("不知道", "unknown"), ("跳过", "skipped")):
             pending = {"id": 30, "thread_id": 7, "fact_text": "F-X 支持某功能", "confirmed_knowledge_id": 20}

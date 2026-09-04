@@ -62,10 +62,11 @@ systemd, batch jobs, review workflow), `TECHNICAL_STATUS_AND_REMEDIATION.md`
 - `templates/` — V2 pages (`inbox.html`, `knowledge.html`, `documents.html`,
   `chat.html`, Chinese UI). `review.html` and `published.html` at repo root
   serve the V1 review UI.
-- `schema.sql` + `migrations/` — additive SQL migrations `001`–`017`;
+- `schema.sql` + `migrations/` — additive SQL migrations `001`–`018`;
   `013_v2_skeleton.sql` through `016_v2_inbox_processing_jobs.sql` are the V2
-  learning/job tables, and `017_v2_inbox_worker_heartbeat.sql` is operational
-  worker liveness state.
+  learning/job tables, `017_v2_inbox_worker_heartbeat.sql` is operational
+  worker liveness state, and `018_v2_organization.sql` is the lightweight
+  entity/relation layer.
   `apply_migration.py` records SHA-256 checksums in `schema_migrations` and
   rejects changed or out-of-tree migration files.
 - Batch/offline scripts (top level): `organize_telegram_knowledge.py`

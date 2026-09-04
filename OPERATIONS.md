@@ -66,22 +66,27 @@ Do not store the environment file or its secrets in Git. Keep the old file as
 a backup until the migration has been verified; it is not used by the new
 units.
 
-Apply the additive heartbeat migration before starting the new worker:
+Apply the additive heartbeat and organization migrations before starting the
+new worker:
 
 ```bash
 sudo -u ubuntu /opt/aihelper/.venv/bin/python /opt/aihelper/apply_migration.py \
   --env-file /etc/aihelper.env migrations/017_v2_inbox_worker_heartbeat.sql
+sudo -u ubuntu /opt/aihelper/.venv/bin/python /opt/aihelper/apply_migration.py \
+  --env-file /etc/aihelper.env migrations/018_v2_organization.sql
 ```
 
 Install and switch units without allowing both web services to bind port
-8000. Stop the old Web unit first. This host currently has the old worker
-running as an unmanaged process rather than an installed unit; inspect the
-exact PID and stop it before starting the replacement:
+8000. Stop the old Web unit first. If an old worker unit exists, stop and
+disable it too; otherwise inspect the exact old worker PID and stop it before
+starting the replacement:
 
 ```bash
 sudo systemctl stop ai-sales-engineer.service
+sudo systemctl stop ai-sales-engineer-worker.service 2>/dev/null || true
 ps -ef | rg '[w]orker.py'
-# After verifying the PID is the old /opt/aihelper/worker.py process:
+# If a worker PID remains after the unit stop, verify it is the old
+# /opt/aihelper/worker.py process before stopping it:
 sudo kill <old-worker-pid>
 sudo install -o root -g root -m 0644 deploy/aihelper.service /etc/systemd/system/aihelper.service
 sudo install -o root -g root -m 0644 deploy/aihelper-inbox-worker.service /etc/systemd/system/aihelper-inbox-worker.service
@@ -91,7 +96,8 @@ sudo systemctl start aihelper.service
 sudo systemctl start aihelper-inbox-worker.service
 sudo systemctl status aihelper --no-pager
 sudo systemctl status aihelper-inbox-worker --no-pager
-sudo systemctl disable ai-sales-engineer.service
+# Only after the new units are verified, prevent the old units from returning:
+sudo systemctl disable ai-sales-engineer.service ai-sales-engineer-worker.service 2>/dev/null || true
 ```
 
 Do not remove the old units or environment backup until `/health`, `/ready`,
