@@ -133,7 +133,11 @@ def summary(conn) -> dict:
         )
         week_count = int(cur.fetchone()["count"])
         cur.execute(
-            "SELECT count(*) AS count FROM v2_learning_proposals WHERE status='pending_confirmation'"
+            """
+            SELECT count(*) AS count
+            FROM v2_learning_proposals
+            WHERE status IN ('pending_clarification', 'pending_confirmation')
+            """
         )
         pending_count = int(cur.fetchone()["count"])
     return {

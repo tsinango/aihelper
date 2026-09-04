@@ -7,7 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).parent
 PAGES = ("inbox.html", "knowledge.html", "documents.html", "chat.html")
 INTERACTIVE_PAGES = ("inbox.html", "chat.html")
-KEY_SETTINGS_PAGES = ("inbox.html", "knowledge.html", "chat.html")
+KEY_SETTINGS_PAGES = PAGES
 
 
 class V2UiTest(unittest.TestCase):
@@ -43,6 +43,7 @@ class V2UiTest(unittest.TestCase):
                 self.assertIn(label, content, page)
             self.assertIn("quick-replies", content, page)
             self.assertIn("message_type", content, page)
+            self.assertIn("clarification", content, page)
             self.assertIn("lastIndex", content, page)
             self.assertIn("label === '我来修正'", content, page)
             self.assertTrue("input.focus()" in content or "$('message-input').focus()" in content, page)

@@ -20,6 +20,15 @@ ALTER TABLE v2_learning_proposals
   ADD COLUMN IF NOT EXISTS comparison_reason TEXT NOT NULL DEFAULT '',
   ADD COLUMN IF NOT EXISTS related_knowledge_ids BIGINT[] NOT NULL DEFAULT ARRAY[]::BIGINT[];
 
+ALTER TABLE v2_inbox_messages
+  DROP CONSTRAINT IF EXISTS v2_inbox_messages_message_type_check;
+
+ALTER TABLE v2_inbox_messages
+  ADD CONSTRAINT v2_inbox_messages_message_type_check CHECK (message_type IN (
+    'text', 'question', 'clarification', 'proposal', 'confirmation',
+    'correction', 'skip', 'unknown', 'summary', 'evidence'
+  ));
+
 -- The original status constraint predates UNCLEAR/pending_clarification.
 ALTER TABLE v2_learning_proposals
   DROP CONSTRAINT IF EXISTS v2_learning_proposals_status_check;
@@ -43,7 +52,7 @@ ALTER TABLE v2_learning_proposals
 ALTER TABLE v2_learning_proposals
   ADD CONSTRAINT v2_learning_proposals_clarification_check CHECK (
     (status = 'pending_clarification'
-      AND comparison_result = 'UNCLEAR'
+      AND comparison_result IN ('ENRICH', 'CONFLICT', 'UNCLEAR')
       AND char_length(btrim(clarification_question)) > 0)
     OR status <> 'pending_clarification'
   );
@@ -53,7 +62,8 @@ ALTER TABLE v2_learning_proposals
 
 ALTER TABLE v2_learning_proposals
   ADD CONSTRAINT v2_learning_proposals_unclear_status_check CHECK (
-    comparison_result <> 'UNCLEAR' OR status = 'pending_clarification'
+    comparison_result <> 'UNCLEAR'
+    OR status NOT IN ('pending_confirmation', 'confirmed')
   );
 
 CREATE INDEX IF NOT EXISTS ix_v2_knowledge_embedding_model

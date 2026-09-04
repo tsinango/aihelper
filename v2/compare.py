@@ -18,7 +18,7 @@ from llm import LLMService, parse_json_response
 log = logging.getLogger("ai-sales-engineer.v2.compare")
 
 DECISIONS = frozenset({"NEW", "CONFIRM", "ENRICH", "CONFLICT", "UNCLEAR"})
-QUESTION_DECISIONS = frozenset({"ENRICH", "CONFLICT", "UNCLEAR"})
+QUESTION_DECISIONS = frozenset({"CONFLICT", "UNCLEAR"})
 REQUIRED_CANDIDATE_DECISIONS = frozenset({"CONFIRM", "ENRICH", "CONFLICT"})
 ALLOWED_RESULT_KEYS = frozenset({"decision", "knowledge_id", "question", "reason"})
 
@@ -40,6 +40,10 @@ PRODUCT_QUESTION_TERMS = frozenset({
     "是否", "什么", "如何", "具体", "哪个", "哪些", "准确",
 })
 
+UNCERTAIN_MARKERS = ("大概", "可能", "应该", "也许", "看情况", "probably", "maybe")
+VAGUE_VERSION_MARKERS = ("新版", "旧版", "老版", "新版本", "旧版本", "以前")
+VAGUE_DIFFERENCE_MARKERS = ("不一样", "有区别", "有差异", "不同")
+
 COMPARE_SYSTEM_PROMPT = """
 你是产品知识学习助理，正在向产品专家核实一条新产品事实。
 输入的 new_fact 是尚未确认的用户证据；retrieved_knowledge 是系统检索到的候选知识。
@@ -58,7 +62,8 @@ COMPARE_SYSTEM_PROMPT = """
 - CONFLICT：新事实与候选存在矛盾；保留双方，不得选择、覆盖或自动裁决任何一方；knowledge_id 只用于指出相关候选。
 - UNCLEAR：型号、系列范围、版本、条件、否定事实或含义不清，无法安全判断。
 - NEW 的 knowledge_id 必须为 null。CONFIRM、ENRICH、CONFLICT 必须给出输入候选中的 knowledge_id；UNCLEAR 的 knowledge_id 必须为 null。
-- ENRICH、CONFLICT、UNCLEAR 必须提出一个真正需要产品专家回答的问题；一次只问一个问题。
+- ENRICH 只有在范围、版本或条件仍缺失时才提出问题；如果补充已经原子且范围明确，question 为 null，交给后续复述确认。
+- CONFLICT、UNCLEAR 必须提出一个真正需要产品专家回答的问题；一次只问一个问题。
 - NEW 和 CONFIRM 的 question 必须为 null；reason 只能说明比较结果，不能添加新的产品事实。
 - 手册或文字没有写某功能，不能推断为“不支持”；只有明确否定证据才是否定事实。
 - 单个型号的事实不能推广到整个系列；新旧版本、hardware revision、firmware、地区和条件都必须保持原范围。
@@ -189,6 +194,20 @@ def safe_question(fact: Mapping[str, str], decision: str = "UNCLEAR") -> str:
     return f"请明确「{label}」这条信息具体适用于哪个型号、版本或条件？"
 
 
+def intrinsic_clarification_question(fact: Mapping[str, str]) -> str | None:
+    """Catch ambiguity in the new statement itself, independent of retrieval."""
+
+    content = _text(fact.get("content"))
+    lowered = content.casefold()
+    if any(marker in lowered for marker in UNCERTAIN_MARKERS):
+        return "这条产品信息目前是不确定说法，你能确认准确结论和适用条件吗？"
+    if any(marker in content for marker in VAGUE_VERSION_MARKERS):
+        return "这里的新版或旧版具体指哪个硬件 revision、固件版本或产品版本？"
+    if any(marker in content for marker in VAGUE_DIFFERENCE_MARKERS):
+        return "你说的产品差异具体是什么，并且适用于哪个版本？"
+    return None
+
+
 def _question_is_safe(question: Any) -> bool:
     if not isinstance(question, str):
         return False
@@ -250,7 +269,10 @@ def _validate_result(
     question = raw.get("question")
     if decision in QUESTION_DECISIONS:
         if not _question_is_safe(question):
-            return _fail_closed(fact, f"{decision} 没有安全的产品专家问题")
+            question = safe_question(fact, decision)
+    elif decision == "ENRICH" and question is not None:
+        if not _question_is_safe(question):
+            question = safe_question(fact, decision)
     elif question is not None:
         return _fail_closed(fact, f"{decision} 不应携带问题")
 
@@ -295,7 +317,22 @@ def compare_and_ask(
     except Exception:
         log.exception("V2 compare judge failed; failing closed")
         return _fail_closed(fact, "比较服务不可用或返回无法解析的结果")
-    return _validate_result(parsed, fact, candidate_ids)
+    result = _validate_result(parsed, fact, candidate_ids)
+    intrinsic_question = intrinsic_clarification_question(fact)
+    if intrinsic_question and result["decision"] == "UNCLEAR":
+        result["question"] = intrinsic_question
+        return result
+    if intrinsic_question and (
+        result["decision"] in {"NEW", "CONFIRM"}
+        or (result["decision"] == "ENRICH" and not result.get("question"))
+    ):
+        return {
+            "decision": "UNCLEAR",
+            "knowledge_id": None,
+            "question": intrinsic_question,
+            "reason": "新输入本身包含尚未明确的版本、差异或不确定表述",
+        }
+    return result
 
 
 __all__ = [
@@ -303,5 +340,6 @@ __all__ = [
     "COMPARE_SYSTEM_PROMPT",
     "DECISIONS",
     "compare_and_ask",
+    "intrinsic_clarification_question",
     "safe_question",
 ]

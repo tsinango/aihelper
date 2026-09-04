@@ -1,30 +1,15 @@
-"""Minimal V2 learning retrieval and evidence comparison."""
+"""Minimal V2 learning retrieval over the small Knowledge collection."""
 
 from __future__ import annotations
 
-import json
 import math
 import re
 from typing import Any
 
 from embeddings import OPENROUTER_EMBEDDING_DIMENSIONS, OPENROUTER_EMBEDDING_MODEL
-from llm import parse_json_response
-
-COMPARISON_RESULTS = frozenset({"NEW", "CONFIRM", "ENRICH", "CONFLICT", "UNCLEAR"})
 TRUST_ORDER = {"official_source": 4, "user_confirmed": 4, "provisional": 2, "conflicted": 1}
 _TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9./()_-]*|[\u0400-\u04ff]+|[\u4e00-\u9fff]")
 _MODEL_RE = re.compile(r"(?=[A-Za-z0-9./()\-]*\d)[A-Za-z0-9][A-Za-z0-9./()\-]{2,}")
-
-COMPARE_SYSTEM_PROMPT = """
-你是 aihelper V2 产品知识比较器。只根据给定的 V2 Knowledge evidence 比较用户新输入，
-不使用训练知识、常识或猜测。严格返回 JSON：
-{"decision":"NEW|CONFIRM|ENRICH|CONFLICT|UNCLEAR","fact_text":"原子事实","clarifying_question":"最多一个问题，没有则为空","reason":"简短原因","related_knowledge_ids":[1]}
-规则：CONFIRM 只能是同一实体、范围、版本和条件下的同一事实；ENRICH 只能补充同一实体的独立细节。
-系列泛化、版本/条件扩大、否定事实、低信任来源并入高信任事实，都必须 UNCLEAR 或 CONFLICT。
-CONFLICT 只保留双方，不自行选择；UNCLEAR 必须提出一个具体问题。单型号不能推广系列；没有提到功能不能解释为不支持。
-related_knowledge_ids 只能使用给定 evidence 的 id，不询问数据库或技术实现。
-""".strip()
-
 
 def _text(value: Any, limit: int = 12000) -> str:
     return str(value or "").strip()[:limit]
@@ -90,6 +75,26 @@ def _query_embedding(embedder, query: str) -> list[float] | None:
         return None
 
 
+def store_knowledge_embedding(conn, knowledge_id: int, text: str, *, embedder=None) -> bool:
+    """Store one compatible vector; embedding failure never blocks learning."""
+
+    embedding = _query_embedding(embedder, _text(text))
+    if embedding is None:
+        return False
+    vector_text = "[" + ",".join(str(float(value)) for value in embedding) + "]"
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE v2_knowledge
+            SET embedding=%s::vector, embedding_model=%s,
+                updated_at=CURRENT_TIMESTAMP
+            WHERE id=%s
+            """,
+            (vector_text, OPENROUTER_EMBEDDING_MODEL, int(knowledge_id)),
+        )
+    return True
+
+
 def retrieve_learning_knowledge(conn, query: str, *, embedder=None, top_k: int = 8,
                                 lexical_k: int | None = None, embedding_k: int | None = None) -> list[dict]:
     """Merge same-model-first lexical hits with an exact embedding scan.
@@ -138,48 +143,4 @@ def retrieve_learning_knowledge(conn, query: str, *, embedder=None, top_k: int =
     return result
 
 
-def build_compare_messages(query: str, candidates: list[dict]) -> list[dict]:
-    evidence = [{key: item.get(key, "") for key in ("id", "title", "content", "entity_name", "trust")} for item in candidates]
-    return [
-        {"role": "system", "content": COMPARE_SYSTEM_PROMPT},
-        {"role": "user", "content": "用户新输入：\n" + _text(query) + "\n\n相关 Knowledge evidence：\n" + json.dumps(evidence, ensure_ascii=False)},
-    ]
-
-
-def compare_knowledge(query: str, candidates: list[dict], llm_service, *, max_tokens: int = 800) -> dict:
-    """Ask OpenRouter for NEW/CONFIRM/ENRICH/CONFLICT/UNCLEAR, fail closed."""
-    query = _text(query)
-    if not query:
-        raise ValueError("query must not be empty")
-    candidates = list(candidates or [])
-    if not candidates:
-        return {"decision": "NEW", "fact_text": query, "clarifying_question": "", "reason": "没有相关 Knowledge。", "related_knowledge_ids": []}
-    try:
-        parsed = parse_json_response(llm_service.judge(build_compare_messages(query, candidates), max_tokens=max_tokens))
-    except Exception:
-        parsed = {}
-    parsed = parsed if isinstance(parsed, dict) else {}
-    decision = _text(parsed.get("decision"), 30).upper()
-    if decision not in COMPARISON_RESULTS:
-        decision = "UNCLEAR"
-    allowed = {int(item["id"]) for item in candidates}
-    related = []
-    for value in parsed.get("related_knowledge_ids", []) if isinstance(parsed.get("related_knowledge_ids"), list) else []:
-        try:
-            value = int(value)
-        except (TypeError, ValueError):
-            continue
-        if value in allowed and value not in related:
-            related.append(value)
-    if decision in {"CONFIRM", "ENRICH", "CONFLICT"} and not related:
-        related = [int(candidates[0]["id"])]
-    question = _text(parsed.get("clarifying_question"), 2000)
-    if decision == "UNCLEAR" and not question:
-        question = "你说的这条信息具体适用于哪个型号、版本或条件？"
-    if decision == "CONFLICT" and not question:
-        question = "这两条说法存在冲突，哪一条适用于当前产品、版本或条件？"
-    return {"decision": decision, "fact_text": _text(parsed.get("fact_text")) or query, "clarifying_question": question, "reason": _text(parsed.get("reason"), 2000), "related_knowledge_ids": related}
-
-
 retrieve = retrieve_learning_knowledge
-compare = compare_knowledge

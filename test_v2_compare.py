@@ -41,6 +41,33 @@ class CompareAndAskTest(unittest.TestCase):
         self.assertIsNone(result["knowledge_id"])
         self.assertIsNone(result["question"])
 
+    def test_vague_version_cannot_be_new_even_without_candidates(self):
+        vague = {"title": "版本差异", "content": "F-X 新版和以前不一样", "entity_name": "F-X"}
+        result, _ = self.call(
+            '{"decision":"NEW","knowledge_id":null,"question":null,"reason":"没有候选"}',
+            fact=vague,
+            candidates=[],
+        )
+        self.assertEqual(result["decision"], "UNCLEAR")
+        self.assertIn("revision", result["question"])
+
+        unclear, _ = self.call(
+            '{"decision":"UNCLEAR","knowledge_id":null,"question":"请说明具体产品信息？","reason":"不清楚"}',
+            fact=vague,
+            candidates=[],
+        )
+        self.assertEqual(unclear["decision"], "UNCLEAR")
+        self.assertIn("硬件 revision", unclear["question"])
+
+    def test_uncertain_wording_cannot_be_confirmed(self):
+        uncertain = {"title": "功能", "content": "F-X 可能支持声音检测", "entity_name": "F-X"}
+        result, _ = self.call(
+            '{"decision":"CONFIRM","knowledge_id":17,"question":null,"reason":"相似"}',
+            fact=uncertain,
+        )
+        self.assertEqual(result["decision"], "UNCLEAR")
+        self.assertIn("准确结论", result["question"])
+
     def test_confirm_must_reference_a_retrieved_candidate(self):
         result, _ = self.call('{"decision":"CONFIRM","knowledge_id":17,"question":null,"reason":"同一事实"}')
         self.assertEqual(result["decision"], "CONFIRM")
@@ -51,6 +78,12 @@ class CompareAndAskTest(unittest.TestCase):
         self.assertEqual(result["decision"], "ENRICH")
         self.assertEqual(result["knowledge_id"], 17)
         self.assertEqual(result["question"], "这个补充信息适用于哪个硬件版本？")
+
+    def test_precise_enrich_can_continue_to_atomic_confirmation(self):
+        result, _ = self.call('{"decision":"ENRICH","knowledge_id":17,"question":null,"reason":"补充信息范围已明确"}')
+        self.assertEqual(result["decision"], "ENRICH")
+        self.assertEqual(result["knowledge_id"], 17)
+        self.assertIsNone(result["question"])
 
     def test_conflict_keeps_both_sides_and_asks_expert(self):
         result, _ = self.call('{"decision":"CONFLICT","knowledge_id":17,"question":"关于这个型号，哪一条产品结论准确？","reason":"两条信息矛盾"}')
@@ -72,8 +105,8 @@ class CompareAndAskTest(unittest.TestCase):
 
     def test_missing_required_question_fails_closed(self):
         result, _ = self.call('{"decision":"CONFLICT","knowledge_id":17,"question":null,"reason":"矛盾"}')
-        self.assertEqual(result["decision"], "UNCLEAR")
-        self.assertIsNone(result["knowledge_id"])
+        self.assertEqual(result["decision"], "CONFLICT")
+        self.assertEqual(result["knowledge_id"], 17)
         self.assertTrue(result["question"].endswith("？"))
 
     def test_unsafe_or_multiple_questions_fail_closed(self):
@@ -84,7 +117,8 @@ class CompareAndAskTest(unittest.TestCase):
 
         multiple = '{"decision":"ENRICH","knowledge_id":17,"question":"适用于哪个型号？哪个版本？","reason":"补充"}'
         result, _ = self.call(multiple)
-        self.assertEqual(result["decision"], "UNCLEAR")
+        self.assertEqual(result["decision"], "ENRICH")
+        self.assertEqual(result["knowledge_id"], 17)
 
         placeholder = '{"decision":"UNCLEAR","knowledge_id":null,"question":"为什么？","reason":"不清楚"}'
         result, _ = self.call(placeholder)

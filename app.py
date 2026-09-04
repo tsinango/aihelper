@@ -1750,6 +1750,7 @@ def v2_inbox_message(payload: V2InboxMessageIn, x_api_key: str | None = Header(N
                 thread_id=payload.thread_id,
                 channel=payload.channel,
                 llm_service=llm,
+                embedding_client=embedder,
                 question_budget=settings["v2_passive_question_budget"],
             )
             return json_safe(result)

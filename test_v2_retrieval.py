@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-import json
 import unittest
 from pathlib import Path
-from unittest.mock import Mock
 
 from embeddings import OPENROUTER_EMBEDDING_DIMENSIONS, OPENROUTER_EMBEDDING_MODEL
-from v2.retrieval import COMPARE_SYSTEM_PROMPT, compare_knowledge, retrieve_learning_knowledge
+from v2.retrieval import retrieve_learning_knowledge, store_knowledge_embedding
 
 
 class Cursor:
@@ -79,27 +77,15 @@ class V2RetrievalTest(unittest.TestCase):
         self.assertEqual([item["id"] for item in result], [1])
         self.assertEqual(result[0]["retrieval_sources"], ["lexical"])
 
-    def test_compare_returns_model_question_and_filters_ids(self):
-        llm = Mock()
-        llm.judge.return_value = json.dumps({"decision": "UNCLEAR", "fact_text": "新版支持声音阈值检测", "clarifying_question": "你说的新版是硬件 revision 还是 firmware 版本？", "reason": "版本范围不明确", "related_knowledge_ids": [7, 999]}, ensure_ascii=False)
-        result = compare_knowledge("F-X 新版支持声音阈值检测", [{"id": 7, "title": "旧版", "content": "F-X 旧版信息", "entity_name": "F-X", "trust": "provisional"}], llm)
-        self.assertEqual(result["decision"], "UNCLEAR")
-        self.assertEqual(result["related_knowledge_ids"], [7])
-        self.assertEqual(result["clarifying_question"], "你说的新版是硬件 revision 还是 firmware 版本？")
-        self.assertIn("没有提到功能不能解释为不支持", COMPARE_SYSTEM_PROMPT)
+    def test_stores_only_a_valid_openrouter_embedding(self):
+        conn = Connection([])
+        vector = [1.0] + [0.0] * (OPENROUTER_EMBEDDING_DIMENSIONS - 1)
+        self.assertTrue(store_knowledge_embedding(conn, 7, "F-X fact", embedder=Embedder(vector)))
+        self.assertIn("UPDATE v2_knowledge", conn.cursors[0].query)
 
-    def test_malformed_compare_fails_closed(self):
-        llm = Mock()
-        llm.judge.return_value = "not json"
-        result = compare_knowledge("F-X 是否支持功能", [{"id": 1, "content": "旧资料", "title": "旧", "entity_name": "F-X"}], llm)
-        self.assertEqual(result["decision"], "UNCLEAR")
-        self.assertTrue(result["clarifying_question"])
-
-    def test_no_candidates_is_new_without_llm(self):
-        llm = Mock()
-        result = compare_knowledge("F-X 支持声音阈值检测", [], llm)
-        self.assertEqual(result["decision"], "NEW")
-        llm.judge.assert_not_called()
+        failed = Connection([])
+        self.assertFalse(store_knowledge_embedding(failed, 7, "F-X fact", embedder=Embedder(error=RuntimeError("offline"))))
+        self.assertEqual(failed.cursors, [])
 
     def test_migration_has_minimal_compare_columns_and_no_vector_index(self):
         sql = Path("migrations/014_v2_learning_compare.sql").read_text(encoding="utf-8")

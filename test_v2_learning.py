@@ -4,6 +4,7 @@ from unittest.mock import patch
 from v2.learning import (
     UNDERSTANDING_SYSTEM_PROMPT,
     _confirm,
+    _plan_fact,
     classify_reply,
     _deduplicate_facts,
     _ask,
@@ -89,16 +90,15 @@ class LearningLoopTest(unittest.TestCase):
         with patch("v2.learning._model_facts", return_value=([
             {"title": "高度", "content": "F-NR-208E/2 是 1U", "entity_name": "F-NR-208E/2"},
             {"title": "系列范围", "content": "需要另外确认 F-NR 系列范围", "entity_name": "F-NR"},
-        ], False)), patch("v2.learning._find_knowledge", return_value=None) as find, patch("v2.learning._create_knowledge", side_effect=[{"id": 20}, {"id": 21}]) as create, patch("v2.learning._insert_proposal", side_effect=[{"id": 30, "thread_id": 7, "fact_text": "F-NR-208E/2 是 1U"}, {"id": 31, "thread_id": 7, "fact_text": "需要另外确认 F-NR 系列范围"}]) as insert, patch("v2.learning._next_question", return_value=({"id": 40, "content": "我理解为：F-NR-208E/2 是 1U。对吗？"}, "我理解为：F-NR-208E/2 是 1U。对吗？", {"id": 30})):
+        ], False)), patch("v2.learning._plan_fact", side_effect=[
+            {"id": 30, "thread_id": 7, "fact_text": "F-NR-208E/2 是 1U"},
+            {"id": 31, "thread_id": 7, "fact_text": "需要另外确认 F-NR 系列范围"},
+        ]) as plan, patch("v2.learning._next_question", return_value=({"id": 40, "content": "我理解为：F-NR-208E/2 是 1U。对吗？"}, "我理解为：F-NR-208E/2 是 1U。对吗？", {"id": 30})):
             result = learn_turn(object(), "F-NR-208E/2 是 1U，并且整个系列都是 1U", llm_service=model)
 
         self.assertEqual(result["status"], "awaiting_confirmation")
         self.assertEqual(result["message"]["id"], 40)
-        self.assertEqual(create.call_args_list[0].kwargs["trust"], "provisional")
-        self.assertEqual(create.call_args_list[1].kwargs["trust"], "provisional")
-        self.assertEqual(insert.call_count, 2)
-        find.assert_called()
-        self.assertNotIn("user_confirmed", str(create.call_args_list))
+        self.assertEqual(plan.call_count, 2)
 
     def test_identical_model_facts_are_deduplicated(self):
         facts = [
@@ -119,7 +119,7 @@ class LearningLoopTest(unittest.TestCase):
 
         common = self._patch_common(pending)
         correction_conn = object()
-        with patch("v2.learning._confirm") as confirm, patch("v2.learning._retire_corrected_knowledge") as retire, patch("v2.learning._model_facts", return_value=([{"title": "修正", "content": "F-NR-208E/2 在旧版不是 1U", "entity_name": "F-NR-208E/2"}], False)), patch("v2.learning._find_knowledge", return_value=None), patch("v2.learning._create_knowledge", return_value={"id": 21}), patch("v2.learning._insert_proposal", return_value={"id": 31}), patch("v2.learning._next_question", return_value=({"id": 41, "content": "我理解为：F-NR-208E/2 在旧版不是 1U。对吗？"}, "", {"id": 31})):
+        with patch("v2.learning._confirm") as confirm, patch("v2.learning._retire_corrected_knowledge") as retire, patch("v2.learning._model_facts", return_value=([{"title": "修正", "content": "F-NR-208E/2 在旧版不是 1U", "entity_name": "F-NR-208E/2"}], False)), patch("v2.learning._plan_fact", return_value={"id": 31}), patch("v2.learning._next_question", return_value=({"id": 41, "content": "我理解为：F-NR-208E/2 在旧版不是 1U。对吗？"}, "", {"id": 31})):
             result = learn_turn(correction_conn, "我觉得旧版不是 1U")
         confirm.assert_not_called()
         retire.assert_called_once_with(correction_conn, pending)
@@ -198,6 +198,165 @@ class LearningLoopTest(unittest.TestCase):
         self.assertEqual(result, message)
         self.assertIn("F-X 支持某功能", text)
         count.assert_not_called()
+
+    def test_clarification_question_is_not_a_confirmation_recap(self):
+        message = {"id": 40, "thread_id": 7, "content": "新版具体指哪个硬件 revision？"}
+        with patch("v2.learning._insert_message", return_value=message) as insert:
+            result, text = _ask(
+                FakeConnection([]),
+                {
+                    "id": 30,
+                    "thread_id": 7,
+                    "status": "pending_clarification",
+                    "entity_name": "F-X",
+                    "clarification_question": "新版具体指哪个硬件 revision？",
+                },
+                {"id": 9, "_unlimited_questions": True},
+            )
+        self.assertEqual(result, message)
+        self.assertEqual(text, "新版具体指哪个硬件 revision？")
+        self.assertEqual(insert.call_args.args[3], "clarification")
+
+    def test_bare_yes_does_not_resolve_a_clarification_question(self):
+        pending = {
+            "id": 30,
+            "thread_id": 7,
+            "status": "pending_clarification",
+            "fact_text": "F-X 新版和以前不一样",
+            "entity_name": "F-X",
+            "clarification_question": "这里的新版具体指哪个产品版本？",
+        }
+        common = self._patch_common(pending)
+        with patch("v2.learning._model_facts") as extract:
+            result = learn_turn(object(), "对")
+        self.assertEqual(result["status"], "awaiting_clarification")
+        self.assertEqual(result["message"]["id"], 11)
+        self.assertEqual(common[7].call_args.args[3], "clarification")
+        extract.assert_not_called()
+        common[5].assert_not_called()
+
+    def test_clarified_conflict_source_is_superseded_but_retained(self):
+        pending = {
+            "id": 30,
+            "thread_id": 7,
+            "source_message_id": 11,
+            "status": "pending_clarification",
+            "comparison_result": "CONFLICT",
+            "fact_text": "F-X 不支持功能 A",
+            "entity_name": "F-X",
+            "confirmed_knowledge_id": 20,
+        }
+        common = self._patch_common(pending)
+        conn = FakeConnection([])
+        with patch("v2.learning._model_facts", return_value=([{
+            "title": "版本条件",
+            "content": "F-X 硬件 revision 2 支持功能 A",
+            "entity_name": "F-X",
+        }], False)), patch("v2.learning._plan_fact", return_value={"id": 31}), patch(
+            "v2.learning._next_question",
+            return_value=({"id": 41}, "确认？", {"id": 31}),
+        ):
+            result = learn_turn(conn, "revision 2 支持", thread_id=7)
+        self.assertEqual(result["status"], "awaiting_confirmation")
+        self.assertTrue(any(
+            "resolution='superseded'" in query and params == (11, 20)
+            for query, params in conn.executed
+        ))
+        common[5].assert_called_once_with(conn, 30, "superseded", message_id=11)
+
+    def test_plan_fact_persists_compare_decision_without_premature_knowledge(self):
+        fact = {"title": "版本差异", "content": "F-X 新版和以前不一样", "entity_name": "F-X"}
+        comparison = {
+            "decision": "UNCLEAR",
+            "knowledge_id": None,
+            "question": "这里的新版具体指哪个硬件版本？",
+            "reason": "版本含义不明确",
+        }
+        with patch("v2.learning.retrieve_learning_knowledge", return_value=[]) as retrieve, patch(
+            "v2.learning.compare_and_ask", return_value=comparison
+        ), patch("v2.learning._create_knowledge") as create, patch(
+            "v2.learning._insert_proposal", return_value={"id": 30}
+        ) as insert:
+            result = _plan_fact(
+                object(),
+                thread_id=7,
+                message_id=11,
+                evidence_id=10,
+                fact=fact,
+                llm_service=object(),
+                embedding_client=object(),
+            )
+        self.assertEqual(result, {"id": 30})
+        create.assert_not_called()
+        retrieve.assert_called_once()
+        self.assertEqual(insert.call_args.kwargs["decision"], "UNCLEAR")
+        self.assertEqual(insert.call_args.kwargs["status"], "pending_clarification")
+        self.assertEqual(
+            insert.call_args.kwargs["clarification_question"],
+            "这里的新版具体指哪个硬件版本？",
+        )
+
+    def test_plan_fact_maps_all_fusion_results_to_safe_states(self):
+        fact = {"title": "功能", "content": "F-X 支持声音阈值检测", "entity_name": "F-X"}
+        candidate = {"id": 17, "content": "F-X 支持声音检测", "entity_name": "F-X"}
+        cases = (
+            ("NEW", 22, "pending_confirmation", "provisional"),
+            ("CONFIRM", 17, "pending_confirmation", None),
+            ("ENRICH", None, "pending_clarification", None),
+            ("CONFLICT", 22, "pending_clarification", "conflicted"),
+        )
+        for decision, expected_knowledge_id, expected_status, created_trust in cases:
+            comparison = {
+                "decision": decision,
+                "knowledge_id": 17 if decision in {"CONFIRM", "ENRICH", "CONFLICT"} else None,
+                "question": "这个信息具体适用于哪个版本？" if decision in {"ENRICH", "CONFLICT"} else None,
+                "reason": "test",
+            }
+            created = {"id": 22}
+            with self.subTest(decision=decision), patch(
+                "v2.learning.retrieve_learning_knowledge", return_value=[candidate]
+            ), patch("v2.learning.compare_and_ask", return_value=comparison), patch(
+                "v2.learning._create_knowledge", return_value=created
+            ) as create, patch("v2.learning._insert_proposal", return_value={"id": 30}) as insert:
+                _plan_fact(
+                    object(),
+                    thread_id=7,
+                    message_id=11,
+                    evidence_id=10,
+                    fact=fact,
+                    llm_service=object(),
+                    embedding_client=None,
+                )
+            self.assertEqual(insert.call_args.args[5], expected_knowledge_id)
+            self.assertEqual(insert.call_args.kwargs["decision"], decision)
+            self.assertEqual(insert.call_args.kwargs["status"], expected_status)
+            if created_trust:
+                create.assert_called_once_with(unittest.mock.ANY, fact, trust=created_trust)
+            else:
+                create.assert_not_called()
+
+    def test_clarification_answer_is_recompared_then_atomically_confirmed(self):
+        pending = {
+            "id": 30,
+            "thread_id": 7,
+            "status": "pending_clarification",
+            "fact_text": "F-X 新版和以前不一样",
+            "clarification_question": "新版具体指哪个硬件 revision？",
+            "confirmed_knowledge_id": None,
+        }
+        common = self._patch_common(pending)
+        clarified = {"title": "版本差异", "content": "F-X 硬件 revision B 使用新接口", "entity_name": "F-X"}
+        with patch("v2.learning._model_facts", return_value=([clarified], False)) as extract, patch(
+            "v2.learning._plan_fact", return_value={"id": 31}
+        ), patch("v2.learning._retire_corrected_knowledge") as retire, patch(
+            "v2.learning._next_question",
+            return_value=({"id": 41, "content": "我理解为：F-X 硬件 revision B 使用新接口。对吗？"}, "", {"id": 31}),
+        ):
+            result = learn_turn(object(), "指硬件 revision B", thread_id=7, llm_service=object())
+        self.assertEqual(result["status"], "awaiting_confirmation")
+        self.assertIn("需要澄清的原始说法", extract.call_args.args[0])
+        common[5].assert_called_once_with(unittest.mock.ANY, 30, "superseded", message_id=11)
+        retire.assert_not_called()
 
 
 if __name__ == "__main__":

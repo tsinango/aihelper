@@ -15,6 +15,8 @@ from typing import Any
 
 from llm import parse_json_response
 
+from v2.compare import compare_and_ask, safe_question
+from v2.retrieval import retrieve_learning_knowledge, store_knowledge_embedding
 from v2.service import create_thread, get_thread, json_safe, thread_response
 from psycopg.types.json import Jsonb
 
@@ -24,9 +26,8 @@ log = logging.getLogger("ai-sales-engineer.v2.learning")
 TRUST_VALUES = frozenset({
     "official_source", "user_confirmed", "provisional", "conflicted",
 })
-ANSWER_TRUST_VALUES = frozenset({"official_source", "user_confirmed"})
 PROPOSAL_STATUSES = frozenset({
-    "pending_confirmation", "confirmed", "corrected", "skipped",
+    "pending_confirmation", "pending_clarification", "confirmed", "corrected", "skipped",
     "unknown", "rejected", "superseded",
 })
 
@@ -88,9 +89,14 @@ def _model_facts(content: str, llm_service=None, context: list[dict] | None = No
         return _fallback_facts(content), True
     messages = [{"role": "system", "content": UNDERSTANDING_SYSTEM_PROMPT}]
     if context:
+        context_lines = []
+        for item in context:
+            context_lines.append("待处理事实：" + _clean(item.get("fact_text")))
+            if item.get("clarification_question"):
+                context_lines.append("AI 已问：" + _clean(item.get("clarification_question")))
         messages.append({
             "role": "user",
-            "content": "此前待确认理解：\n" + "\n".join(_clean(item.get("fact_text")) for item in context),
+            "content": "此前对话上下文：\n" + "\n".join(context_lines),
         })
     messages.append({"role": "user", "content": content})
     try:
@@ -226,9 +232,12 @@ def _pending_proposal(conn, thread_id: int) -> dict | None:
             SELECT id, thread_id, source_message_id, question_message_id,
                    fact_text, entity_name, proposed_trust, status,
                    confirmed_knowledge_id, resolution_message_id,
+                   comparison_result, clarification_question,
+                   comparison_reason, related_knowledge_ids,
                    created_at, updated_at
             FROM v2_learning_proposals
-            WHERE thread_id=%s AND status='pending_confirmation'
+            WHERE thread_id=%s
+              AND status IN ('pending_clarification', 'pending_confirmation')
             ORDER BY id LIMIT 1
             """,
             (thread_id,),
@@ -240,7 +249,13 @@ def _pending_proposal(conn, thread_id: int) -> dict | None:
 def _pending_context(conn, thread_id: int) -> list[dict]:
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT fact_text FROM v2_learning_proposals WHERE thread_id=%s AND status='pending_confirmation' ORDER BY id",
+            """
+            SELECT fact_text, clarification_question, comparison_result
+            FROM v2_learning_proposals
+            WHERE thread_id=%s
+              AND status IN ('pending_clarification', 'pending_confirmation')
+            ORDER BY id
+            """,
             (thread_id,),
         )
         return [dict(row) for row in cur.fetchall()]
@@ -256,28 +271,6 @@ def _lock_thread(conn, thread_id: int) -> None:
         )
         if cur.fetchone() is None:
             raise ValueError(f"V2 thread {thread_id} disappeared during the learning turn")
-
-
-def _find_knowledge(conn, fact: dict) -> dict | None:
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT id, title, content, entity_name, trust, active,
-                   created_at, updated_at
-            FROM v2_knowledge
-            WHERE active=TRUE AND lower(content)=lower(%s)
-              AND lower(entity_name)=lower(%s)
-            ORDER BY CASE trust
-                WHEN 'official_source' THEN 0
-                WHEN 'user_confirmed' THEN 1
-                WHEN 'provisional' THEN 2
-                ELSE 3 END, id
-            LIMIT 1
-            """,
-            (fact["content"], fact.get("entity_name") or ""),
-        )
-        row = cur.fetchone()
-    return dict(row) if row else None
 
 
 def _create_knowledge(conn, fact: dict, *, trust: str = "provisional") -> dict:
@@ -324,31 +317,66 @@ def _link_source(
         )
 
 
-def _insert_proposal(conn, thread_id: int, message_id: int, evidence_id: int, fact: dict, knowledge_id: int) -> dict:
+def _insert_proposal(
+    conn,
+    thread_id: int,
+    message_id: int,
+    evidence_id: int,
+    fact: dict,
+    knowledge_id: int | None,
+    *,
+    decision: str = "NEW",
+    status: str = "pending_confirmation",
+    clarification_question: str = "",
+    comparison_reason: str = "",
+    related_knowledge_ids: list[int] | None = None,
+) -> dict:
+    if decision not in {"NEW", "CONFIRM", "ENRICH", "CONFLICT", "UNCLEAR"}:
+        raise ValueError(f"unknown V2 comparison result: {decision}")
+    if status not in {"pending_confirmation", "pending_clarification"}:
+        raise ValueError(f"invalid new proposal status: {status}")
     with conn.cursor() as cur:
         cur.execute(
             """
             INSERT INTO v2_learning_proposals(
                 thread_id, source_message_id, fact_text, entity_name,
-                proposed_trust, status, confirmed_knowledge_id
+                proposed_trust, status, confirmed_knowledge_id,
+                comparison_result, clarification_question,
+                comparison_reason, related_knowledge_ids
             )
-            VALUES(%s, %s, %s, %s, 'provisional', 'pending_confirmation', %s)
+            VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id, thread_id, source_message_id, question_message_id,
                       fact_text, entity_name, proposed_trust, status,
                       confirmed_knowledge_id, resolution_message_id,
+                      comparison_result, clarification_question,
+                      comparison_reason, related_knowledge_ids,
                       created_at, updated_at
             """,
-            (thread_id, message_id, fact["content"], fact.get("entity_name") or "", knowledge_id),
+            (
+                thread_id,
+                message_id,
+                fact["content"],
+                fact.get("entity_name") or "",
+                "conflicted" if decision == "CONFLICT" else "provisional",
+                status,
+                knowledge_id,
+                decision,
+                clarification_question,
+                comparison_reason,
+                list(related_knowledge_ids or []),
+            ),
         )
         proposal = dict(cur.fetchone())
-    _link_source(
-        conn,
-        knowledge_id,
-        evidence_id,
-        source_kind="user_input",
-        source_role="primary",
-        excerpt=fact["content"],
-    )
+    if knowledge_id is not None:
+        _link_source(
+            conn,
+            knowledge_id,
+            evidence_id,
+            source_kind="user_input",
+            source_role="primary",
+            resolution="unresolved",
+            excerpt=fact["content"],
+        )
     return proposal
 
 
@@ -388,8 +416,20 @@ def _ask(conn, proposal: dict, session: dict) -> tuple[dict | None, str | None]:
         asked, budget = _session_question_count(conn, int(session["id"]))
     if budget is not None and asked >= budget:
         return None, None
-    text = f"我理解为：{proposal['fact_text']}。对吗？"
-    message = _insert_message(conn, int(proposal["thread_id"]), "assistant", "question", text)
+    if proposal.get("status") == "pending_clarification":
+        text = _clean(proposal.get("clarification_question"), 2000)
+        if not text:
+            text = safe_question({"entity_name": proposal.get("entity_name", "")})
+    else:
+        text = f"我理解为：{proposal['fact_text']}。对吗？"
+    message_type = (
+        "clarification"
+        if proposal.get("status") == "pending_clarification"
+        else "question"
+    )
+    message = _insert_message(
+        conn, int(proposal["thread_id"]), "assistant", message_type, text
+    )
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -427,10 +467,13 @@ def _update_proposal(
             SET status=%s, confirmed_knowledge_id=COALESCE(%s, confirmed_knowledge_id),
                 resolution_message_id=COALESCE(%s, resolution_message_id),
                 updated_at=CURRENT_TIMESTAMP
-            WHERE id=%s AND status='pending_confirmation'
+            WHERE id=%s
+              AND status IN ('pending_clarification', 'pending_confirmation')
             RETURNING id, thread_id, source_message_id, question_message_id,
                       fact_text, entity_name, proposed_trust, status,
                       confirmed_knowledge_id, resolution_message_id,
+                      comparison_result, clarification_question,
+                      comparison_reason, related_knowledge_ids,
                       created_at, updated_at
             """,
             (status, knowledge_id, message_id, proposal_id),
@@ -441,7 +484,14 @@ def _update_proposal(
     return dict(row)
 
 
-def _confirm(conn, proposal: dict, evidence: dict, message: dict) -> dict:
+def _confirm(
+    conn,
+    proposal: dict,
+    evidence: dict,
+    message: dict,
+    *,
+    embedding_client=None,
+) -> dict:
     if proposal.get("status") not in (None, "pending_confirmation"):
         raise ValueError("only a pending V2 proposal can be confirmed")
     knowledge_id = proposal.get("confirmed_knowledge_id")
@@ -466,6 +516,18 @@ def _confirm(conn, proposal: dict, evidence: dict, message: dict) -> dict:
     if row is None:
         raise ValueError("the Knowledge attached to this proposal is inactive or conflicted")
     knowledge = dict(row)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE v2_knowledge_sources s
+            SET resolution='accepted'
+            FROM v2_inbox_messages m
+            WHERE m.id=%s AND s.knowledge_id=%s
+              AND s.raw_evidence_id=m.raw_evidence_id
+              AND s.active=TRUE AND s.relation='supports'
+            """,
+            (proposal.get("source_message_id"), knowledge_id),
+        )
     _link_source(
         conn,
         int(knowledge_id),
@@ -475,6 +537,12 @@ def _confirm(conn, proposal: dict, evidence: dict, message: dict) -> dict:
         excerpt=evidence["content"],
     )
     _update_proposal(conn, int(proposal["id"]), "confirmed", knowledge_id=int(knowledge_id), message_id=int(message["id"]))
+    store_knowledge_embedding(
+        conn,
+        int(knowledge_id),
+        " ".join(filter(None, (knowledge.get("entity_name"), knowledge.get("title"), knowledge.get("content")))),
+        embedder=embedding_client,
+    )
     return knowledge
 
 
@@ -517,6 +585,85 @@ def _retire_corrected_knowledge(conn, proposal: dict) -> None:
             """,
             (knowledge_id,),
         )
+
+
+def _supersede_proposal_source(conn, proposal: dict) -> None:
+    """Close the provisional source behind a clarified conflict without deleting it."""
+
+    knowledge_id = proposal.get("confirmed_knowledge_id")
+    if not knowledge_id:
+        return
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE v2_knowledge_sources s
+            SET active=FALSE, resolution='superseded'
+            FROM v2_inbox_messages m
+            WHERE m.id=%s AND s.knowledge_id=%s
+              AND s.raw_evidence_id=m.raw_evidence_id
+              AND s.active=TRUE AND s.resolution='unresolved'
+            """,
+            (proposal.get("source_message_id"), knowledge_id),
+        )
+
+
+def _plan_fact(
+    conn,
+    *,
+    thread_id: int,
+    message_id: int,
+    evidence_id: int,
+    fact: dict,
+    llm_service,
+    embedding_client,
+) -> dict:
+    """Retrieve, compare, and persist one atomic next step."""
+
+    candidates = retrieve_learning_knowledge(
+        conn,
+        " ".join(filter(None, (fact.get("entity_name"), fact.get("content")))),
+        embedder=embedding_client,
+        top_k=5,
+    )
+    comparison = compare_and_ask(fact, candidates, llm_service)
+    decision = comparison["decision"]
+    related_ids = (
+        [int(comparison["knowledge_id"])]
+        if comparison.get("knowledge_id") is not None
+        else []
+    )
+
+    if decision == "CONFIRM":
+        knowledge_id = related_ids[0]
+        status = "pending_confirmation"
+    elif decision == "NEW" or (decision == "ENRICH" and not comparison.get("question")):
+        knowledge = _create_knowledge(conn, fact, trust="provisional")
+        knowledge_id = int(knowledge["id"])
+        status = "pending_confirmation"
+    elif decision == "CONFLICT":
+        knowledge = _create_knowledge(conn, fact, trust="conflicted")
+        knowledge_id = int(knowledge["id"])
+        status = "pending_clarification"
+    else:
+        # Ambiguous ENRICH and UNCLEAR stay as raw evidence until the expert has supplied
+        # the missing scope/version/condition. This prevents provisional text
+        # from being merged into trusted Knowledge before confirmation.
+        knowledge_id = None
+        status = "pending_clarification"
+
+    return _insert_proposal(
+        conn,
+        thread_id,
+        message_id,
+        evidence_id,
+        fact,
+        knowledge_id,
+        decision=decision,
+        status=status,
+        clarification_question=comparison.get("question") or "",
+        comparison_reason=comparison.get("reason") or "",
+        related_knowledge_ids=related_ids,
+    )
 
 
 def _summary(conn, thread_id: int, session: dict) -> tuple[dict | None, str | None]:
@@ -595,6 +742,14 @@ def _result(conn, thread_id: int, *, status: str, message: dict | None = None, p
     return json_safe(payload)
 
 
+def _awaiting_status(proposal: dict | None) -> str:
+    return (
+        "awaiting_clarification"
+        if proposal and proposal.get("status") == "pending_clarification"
+        else "awaiting_confirmation"
+    )
+
+
 def learn_turn(
     conn,
     content: str,
@@ -602,6 +757,7 @@ def learn_turn(
     thread_id: int | None = None,
     channel: str = "inbox",
     llm_service=None,
+    embedding_client=None,
     question_budget: int = 5,
 ) -> dict:
     """Persist one expert turn and advance exactly one atomic confirmation."""
@@ -633,6 +789,11 @@ def learn_turn(
             "active_grill",
         }
         pending = _pending_proposal(conn, current_thread_id)
+        pending_status = (
+            (pending.get("status") or "pending_confirmation")
+            if pending
+            else None
+        )
         evidence = _insert_evidence(conn, clean, current_thread_id, channel=channel)
         reply_kind = classify_reply(clean) if pending else "new"
         message_type = {
@@ -657,14 +818,20 @@ def learn_turn(
             )
             return _result(conn, current_thread_id, status="no_pending", message=response)
 
-        if pending and reply_kind == "confirm":
-            _confirm(conn, pending, evidence, user_message)
+        if pending and pending_status == "pending_confirmation" and reply_kind == "confirm":
+            _confirm(
+                conn,
+                pending,
+                evidence,
+                user_message,
+                embedding_client=embedding_client,
+            )
             next_message, _, next_proposal = _next_question(conn, current_thread_id, session)
             if next_message:
                 return _result(
                     conn,
                     current_thread_id,
-                    status="awaiting_confirmation",
+                    status=_awaiting_status(next_proposal),
                     message=next_message,
                     proposal=next_proposal,
                 )
@@ -675,6 +842,26 @@ def learn_turn(
                 status="confirmed",
                 message=summary_message,
                 summary=summary_text,
+            )
+
+        if pending and pending_status == "pending_clarification" and reply_kind == "confirm":
+            # Clarification questions are deliberately not yes/no questions.  A
+            # bare confirmation is not product evidence and must not supersede
+            # the unresolved proposal or be extracted as a new fact.
+            clarification = _insert_message(
+                conn,
+                current_thread_id,
+                "assistant",
+                "clarification",
+                _clean(pending.get("clarification_question"), 2000)
+                or safe_question({"entity_name": pending.get("entity_name", "")}),
+            )
+            return _result(
+                conn,
+                current_thread_id,
+                status="awaiting_clarification",
+                message=clarification,
+                proposal=pending,
             )
 
         if pending and reply_kind in {"unknown", "skip"}:
@@ -698,7 +885,7 @@ def learn_turn(
                 return _result(
                     conn,
                     current_thread_id,
-                    status="awaiting_confirmation",
+                    status=_awaiting_status(next_proposal),
                     message=next_message,
                     proposal=next_proposal,
                 )
@@ -711,34 +898,42 @@ def learn_turn(
                 summary=summary_text,
             )
 
+        extraction_input = clean
+        if pending and pending_status == "pending_clarification":
+            extraction_input = (
+                f"需要澄清的原始说法：{pending['fact_text']}\n"
+                f"产品专家的补充回答：{clean}"
+            )
         facts, fallback = _model_facts(
-            clean,
+            extraction_input,
             llm_service,
             _pending_context(conn, current_thread_id) if pending else None,
         )
         facts = _deduplicate_facts(facts)
         if pending:
-            _retire_corrected_knowledge(conn, pending)
+            if pending_status == "pending_confirmation":
+                _retire_corrected_knowledge(conn, pending)
+                finished_status = "corrected"
+            else:
+                _supersede_proposal_source(conn, pending)
+                finished_status = "superseded"
             _update_proposal(
-                conn, int(pending["id"]), "corrected", message_id=int(user_message["id"])
+                conn,
+                int(pending["id"]),
+                finished_status,
+                message_id=int(user_message["id"]),
             )
 
         first_proposal = None
         for fact in facts:
-            existing = _find_knowledge(conn, fact)
-            if existing and existing["trust"] in ANSWER_TRUST_VALUES:
-                # This turn is provisional user input.  Retaining the raw
-                # evidence is sufficient for an exact duplicate; linking it
-                # to a trusted fact would merge lower-trust provenance.
-                continue
-            knowledge = existing or _create_knowledge(conn, fact, trust="provisional")
-            proposal = _insert_proposal(
+            proposal = _plan_fact(
                 conn,
-                current_thread_id,
-                int(user_message["id"]),
-                int(evidence["id"]),
-                fact,
-                int(knowledge["id"]),
+                thread_id=current_thread_id,
+                message_id=int(user_message["id"]),
+                evidence_id=int(evidence["id"]),
+                fact=fact,
+                llm_service=llm_service,
+                embedding_client=embedding_client,
             )
             if first_proposal is None:
                 first_proposal = proposal
@@ -749,7 +944,7 @@ def learn_turn(
                 current_thread_id,
                 "assistant",
                 "text",
-                "这条信息和已有的已确认知识一致；我保留了原始输入，但没有把未确认来源并入已确认知识。",
+                "我保留了原始输入，但还没有形成可以确认的产品事实。",
             )
             return _result(conn, current_thread_id, status="reused", message=response, fallback=fallback)
 
@@ -775,7 +970,7 @@ def learn_turn(
         return _result(
             conn,
             current_thread_id,
-            status="awaiting_confirmation",
+            status=_awaiting_status(active_proposal),
             message=question_message,
             proposal=active_proposal,
             fallback=fallback,
