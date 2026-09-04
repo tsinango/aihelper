@@ -132,10 +132,12 @@
   <script>
     const $ = id => document.getElementById(id);
     const CACHE_MODE = 'no-store';
-    const REQUEST_TIMEOUT_MS = 150000;
-    const THINKING_SLOW_MS = 10000;
+    const SUBMIT_TIMEOUT_MS = 10000;
+    const POLL_TIMEOUT_MS = 5000;
+    const POLL_INTERVAL_MS = 2500;
+    const MAX_POLL_FAILURES = 12;
     const isCoarse = typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia('(pointer: coarse)').matches;
-    const state = {threads: [], threadId: null, lastMessages: [], inboxRequest: 0, threadRequest: 0, sending: false, failedContent: '', slowTimer: 0};
+    const state = {threads: [], threadId: null, lastMessages: [], inboxRequest: 0, threadRequest: 0, sending: false, failedContent: '', requestKey: '', activeJob: null, failedJob: null, pollTimer: 0, pollFailures: 0};
     const keyInput = $('api-key');
     if (keyInput) keyInput.value = getStoredKey();
 
@@ -168,7 +170,7 @@
       return {'x-api-key': getStoredKey(), ...(json ? {'Content-Type': 'application/json'} : {})};
     }
 
-    async function api(path, options = {}) {
+    async function api(path, options = {}, timeoutMs = POLL_TIMEOUT_MS) {
       if (!getStoredKey()) {
         const settings = $('key-settings');
         if (settings) settings.open = true;
@@ -176,7 +178,7 @@
         throw new Error('请先在设置中保存 API Key');
       }
       const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-      const timer = controller ? setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS) : 0;
+      const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : 0;
       let response;
       try {
         response = await fetch(path, {
@@ -186,7 +188,7 @@
           headers: {...headers(Boolean(options.body)), ...(options.headers || {})},
         });
       } catch (error) {
-        if (error && error.name === 'AbortError') throw new Error('处理时间有点长，请重试。');
+        if (error && error.name === 'AbortError') throw new Error('连接暂时中断，正在重新连接……');
         throw new Error('无法连接服务，请确认 API 已启动');
       } finally {
         if (timer) clearTimeout(timer);
@@ -259,7 +261,7 @@
         const button = document.createElement('button');
         button.className = 'thread-item' + (String(id) === String(state.threadId) ? ' active' : '');
         button.type = 'button';
-        button.disabled = state.sending;
+        button.disabled = state.sending || state.activeJob != null;
         button.innerHTML = '<strong></strong><small></small><time></time>';
         button.querySelector('strong').textContent = value(thread, 'title', 'subject', 'preview') || '未命名对话';
         const count = value(thread, 'message_count');
@@ -347,9 +349,10 @@
       const request = ++state.threadRequest;
       renderThreads();
       try {
-        const data = await api(`/api/v2/inbox/threads/${encodeURIComponent(id)}`);
+        const data = await api(`/api/v2/inbox/threads/${encodeURIComponent(id)}`, {}, POLL_TIMEOUT_MS);
         if (request !== state.threadRequest || String(state.threadId) !== String(id)) return;
         renderMessages(data);
+        resumeActiveJob(data.jobs);
       } catch (error) {
         if (request !== state.threadRequest) return;
         showError(error.message);
@@ -392,16 +395,15 @@
       } catch (_) { /* side-panel refresh is best-effort */ }
     }
 
-    function showThinking() {
+    function showThinking(status = 'processing') {
       const box = $('thinking');
       const text = $('thinking-text');
-      if (text) text.textContent = '正在理解你的内容……';
+      const labels = {
+        queued: '已收到你的内容，正在排队处理……',
+        processing: '正在理解你的内容……',
+      };
+      if (text) text.textContent = labels[status] || labels.processing;
       if (box) box.hidden = false;
-      clearTimeout(state.slowTimer);
-      state.slowTimer = setTimeout(() => {
-        const slow = $('thinking-text');
-        if (slow && state.sending) slow.textContent = '正在查看已有知识，还需要一点时间……';
-      }, THINKING_SLOW_MS);
     }
 
     function hideThinking() {
@@ -422,55 +424,160 @@
       if (box) box.hidden = true;
     }
 
-    async function sendMessage(content) {
-      if (state.sending) return;
+    function setRetryLabel(label) {
+      const button = $('chat-error-retry');
+      if (button) button.textContent = label;
+    }
+
+    function newRequestKey() {
+      if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+      return `inbox-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    }
+
+    function clearPollTimer() {
+      if (state.pollTimer) clearTimeout(state.pollTimer);
+      state.pollTimer = 0;
+    }
+
+    function scheduleJobPoll() {
+      clearPollTimer();
+      if (!state.activeJob || state.pollFailures >= MAX_POLL_FAILURES) return;
+      state.pollTimer = setTimeout(() => pollJob(state.activeJob), POLL_INTERVAL_MS);
+    }
+
+    async function pollJob(job) {
+      if (!job || !state.activeJob || String(job.job_id) !== String(state.activeJob.job_id)) return;
+      showThinking(job.status);
+      try {
+        const data = await api(`/api/v2/inbox/jobs/${encodeURIComponent(job.job_id)}`, {}, POLL_TIMEOUT_MS);
+        if (!state.activeJob || String(data.job_id) !== String(state.activeJob.job_id)) return;
+        state.activeJob = data;
+        state.pollFailures = 0;
+        if (data.status === 'queued' || data.status === 'processing') {
+          clearChatError();
+          showThinking(data.status);
+          scheduleJobPoll();
+          return;
+        }
+        if (data.status === 'failed') {
+          state.activeJob = null;
+          state.failedJob = data;
+          hideThinking();
+          setRetryLabel('重新处理');
+          showChatError('处理失败');
+          renderThreads();
+          return;
+        }
+        if (data.status === 'completed') {
+          try {
+            const refreshed = await api(`/api/v2/inbox/threads/${encodeURIComponent(data.thread_id)}`, {}, POLL_TIMEOUT_MS);
+            if (!state.activeJob || String(data.job_id) !== String(state.activeJob.job_id)) return;
+            state.activeJob = null;
+            state.failedJob = null;
+            hideThinking();
+            clearChatError();
+            renderMessages(refreshed);
+            refreshThreads();
+            renderThreads();
+          } catch (_) {
+            setRetryLabel('重新连接');
+            showChatError('连接暂时中断，正在重新连接……');
+            scheduleJobPoll();
+          }
+        }
+      } catch (_) {
+        state.pollFailures += 1;
+        setRetryLabel('重新连接');
+        showChatError(state.pollFailures < MAX_POLL_FAILURES
+          ? '连接暂时中断，正在重新连接……'
+          : '连接暂时中断，刷新页面后会继续查看处理进度。');
+        scheduleJobPoll();
+      }
+    }
+
+    function resumeActiveJob(jobs) {
+      const active = Array.isArray(jobs) ? jobs.find(job => ['queued', 'processing'].includes(job.status)) : null;
+      if (!active) return;
+      state.activeJob = active;
+      state.pollFailures = 0;
+      clearChatError();
+      showThinking(active.status);
+      scheduleJobPoll();
+      renderThreads();
+    }
+
+    async function retryJob(job) {
+      if (!job || state.sending) return;
+      clearChatError();
+      state.failedJob = null;
+      state.activeJob = {job_id: job.job_id, thread_id: job.thread_id, status: 'queued'};
+      state.pollFailures = 0;
+      showThinking('queued');
+      renderThreads();
+      try {
+        const data = await api(`/api/v2/inbox/jobs/${encodeURIComponent(job.job_id)}/retry`, {method: 'POST'}, POLL_TIMEOUT_MS);
+        state.activeJob = data;
+        scheduleJobPoll();
+      } catch (error) {
+        state.activeJob = null;
+        state.failedJob = job;
+        hideThinking();
+        showChatError(error.message || '处理失败');
+        setRetryLabel('重新处理');
+        renderThreads();
+      }
+    }
+
+    async function sendMessage(content, requestKey = null) {
+      if (state.sending || state.activeJob) return;
       const sendButton = $('send-button');
       const input = $('message-input');
-      const sentThreadId = state.threadId;
       state.sending = true;
+      state.failedJob = null;
       state.failedContent = '';
+      // A key is reused only when recovering a submit whose response was
+      // lost. Every new user message gets a fresh idempotency key.
+      state.requestKey = requestKey || newRequestKey();
       clearChatError();
       const previous = state.lastMessages[state.lastMessages.length - 1];
       const optimistic = previous && previous.role === 'user' && previous.content === content
         ? state.lastMessages.slice()
         : state.lastMessages.concat([{role: 'user', content}]);
       renderMessages({messages: optimistic});
-      showThinking();
+      showThinking('queued');
       if (sendButton) sendButton.disabled = true;
       let data = null;
       try {
         const body = {content};
         if (state.threadId) body.thread_id = state.threadId;
-        data = await api('/api/v2/inbox/messages', {method: 'POST', body: JSON.stringify(body)});
+        data = await api('/api/v2/inbox/messages', {method: 'POST', body: JSON.stringify(body), headers: {'Idempotency-Key': state.requestKey}}, SUBMIT_TIMEOUT_MS);
       } catch (error) {
         state.failedContent = content;
-        showChatError(error.message);
+        hideThinking();
+        setRetryLabel('重试');
+        showChatError('连接暂时中断，正在重新连接……');
         return;
       } finally {
         state.sending = false;
         if (sendButton) sendButton.disabled = false;
-        hideThinking();
       }
       if (data && data.thread_id) {
         state.threadId = data.thread_id;
         writeStoredThreadId(data.thread_id);
       }
-      // Refresh the current thread explicitly instead of relying on page state.
-      let refreshed = null;
-      try {
-        refreshed = await api(`/api/v2/inbox/threads/${encodeURIComponent(state.threadId)}`);
-      } catch (_) {
-        refreshed = data && Array.isArray(data.messages) ? data : null;
-      }
-      if (refreshed && (sentThreadId == null || String(state.threadId) === String(sentThreadId))) {
-        renderMessages(refreshed);
-      }
-      refreshThreads();
+      state.activeJob = data;
+      state.pollFailures = 0;
+      showThinking(data.status || 'queued');
+      renderThreads();
+      pollJob(state.activeJob);
       if (input && !isCoarse) input.focus();
-      scrollToBottom();
     }
 
     function startNewThread() {
+      clearPollTimer();
+      state.activeJob = null;
+      state.failedJob = null;
+      state.failedContent = '';
       state.threadId = null;
       writeStoredThreadId(null);
       renderMessages([]);
@@ -505,7 +612,7 @@
 
     $('composer').addEventListener('submit', event => {
       event.preventDefault();
-      if (state.sending) return;
+      if (state.sending || state.activeJob) return;
       const input = $('message-input');
       const content = String((input && input.value) || '').trim();
       if (!content) return;
@@ -531,8 +638,15 @@
     $('drawer-backdrop').addEventListener('click', closeDrawer);
     $('new-thread').addEventListener('click', startNewThread);
     $('chat-error-retry').addEventListener('click', () => {
+      if (state.failedJob) return retryJob(state.failedJob);
+      if (state.activeJob) {
+        state.pollFailures = 0;
+        clearChatError();
+        pollJob(state.activeJob);
+        return;
+      }
       const content = state.failedContent;
-      if (content) sendMessage(content);
+      if (content) sendMessage(content, state.requestKey);
     });
 
     function showError(message) { const box = $('page-error'); if (!box) return; box.textContent = message; box.hidden = false; }

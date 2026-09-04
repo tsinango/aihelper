@@ -42,6 +42,15 @@ class V2SkeletonTest(unittest.TestCase):
         self.assertIn("WHERE external_thread_id IS NOT NULL", service)
         self.assertIn("RETURNING id, origin AS channel, status, thread_type AS mode", service)
 
+    def test_inbox_processing_jobs_are_durable_and_idempotent(self):
+        migration = (ROOT / "migrations" / "016_v2_inbox_processing_jobs.sql").read_text()
+        self.assertIn("CREATE TABLE IF NOT EXISTS v2_inbox_processing_jobs", migration)
+        for status in ("queued", "processing", "completed", "failed"):
+            self.assertIn(f"'{status}'", migration)
+        self.assertIn("idempotency_key TEXT NOT NULL UNIQUE", migration)
+        self.assertIn("REFERENCES v2_raw_evidence(id) ON DELETE RESTRICT", migration)
+        self.assertIn("REFERENCES v2_inbox_messages(id) ON DELETE RESTRICT", migration)
+
     def test_v2_pages_and_routes_exist_without_replacing_v1(self):
         for page in ("inbox.html", "knowledge.html", "documents.html", "chat.html"):
             self.assertTrue((ROOT / "templates" / page).is_file(), page)

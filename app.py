@@ -16,7 +16,7 @@ from pathlib import Path
 import httpx
 import psycopg
 from fastapi import BackgroundTasks, Body, FastAPI, File, Header, HTTPException, Query, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
@@ -45,6 +45,7 @@ from logging_security import install_telegram_logging_redaction, register_telegr
 from telegram_relations import classify_message, message_evidence_status, message_id
 from v2.service import (
     V2NotFound,
+    get_processing_job,
     inbox_snapshot,
     json_safe,
     list_documents,
@@ -52,6 +53,12 @@ from v2.service import (
     thread_response,
 )
 from v2.learning import learn_turn
+from v2.processing import (
+    enqueue_inbox_job,
+    process_inbox_job,
+    recover_inbox_jobs,
+    retry_inbox_job,
+)
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 install_telegram_logging_redaction()
@@ -91,6 +98,16 @@ class V2InboxMessageIn(BaseModel):
     content: str = Field(min_length=1, max_length=12000)
     thread_id: int | None = Field(default=None, gt=0)
     channel: str = Field(default="inbox", min_length=1, max_length=32)
+
+
+def _process_v2_inbox_job(job_id: int) -> None:
+    process_inbox_job(
+        int(job_id),
+        db_factory=db,
+        llm_service=llm,
+        embedding_client=embedder,
+        question_budget=settings["v2_passive_question_budget"],
+    )
 
 
 def telegram_token() -> str:
@@ -871,6 +888,14 @@ async def lifespan(_app: FastAPI):
             )
         except Exception:
             log.exception("OpenRouter clients failed to initialize")
+    # Jobs are durable; a process restart must not strand a queued or
+    # interrupted submission. Recovery runs off the event loop and uses the
+    # same small job executor as new submissions.
+    asyncio.create_task(asyncio.to_thread(
+        recover_inbox_jobs,
+        db_factory=db,
+        process_job=_process_v2_inbox_job,
+    ))
     yield
 
 
@@ -1740,24 +1765,93 @@ def v2_inbox(x_api_key: str | None = Header(None)):
 
 
 @app.post("/api/v2/inbox/messages")
-def v2_inbox_message(payload: V2InboxMessageIn, x_api_key: str | None = Header(None)):
+def v2_inbox_message(
+    payload: V2InboxMessageIn,
+    background_tasks: BackgroundTasks,
+    x_api_key: str | None = Header(None),
+    idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
+):
     auth(x_api_key)
     try:
         with db() as conn:
-            result = learn_turn(
+            job = enqueue_inbox_job(
                 conn,
                 payload.content,
                 thread_id=payload.thread_id,
                 channel=payload.channel,
-                llm_service=llm,
-                embedding_client=embedder,
-                question_budget=settings["v2_passive_question_budget"],
+                idempotency_key=idempotency_key,
             )
-            return json_safe(result)
+        background_tasks.add_task(_process_v2_inbox_job, int(job["id"]))
+        return JSONResponse(
+            status_code=202,
+            content=json_safe({
+                "thread_id": int(job["thread_id"]),
+                "job_id": int(job["id"]),
+                "status": job["status"],
+            }),
+        )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     except V2NotFound as exc:
         raise HTTPException(404, str(exc)) from exc
+
+
+@app.get("/api/v2/inbox/jobs/{job_id}")
+def v2_inbox_job(job_id: int, x_api_key: str | None = Header(None)):
+    auth(x_api_key)
+    with db() as conn:
+        job = get_processing_job(conn, int(job_id))
+    if not job:
+        raise HTTPException(404, "V2 Inbox job was not found")
+    assistant_message = None
+    if job.get("assistant_message_id") is not None:
+        assistant_message = {
+            "id": job["assistant_message_id"],
+            "content": job.get("assistant_message") or "",
+            "message_type": job.get("assistant_message_type") or "text",
+        }
+    return json_safe({
+        "job_id": int(job["id"]),
+        "thread_id": int(job["thread_id"]),
+        "raw_evidence_id": int(job["raw_evidence_id"]),
+        "user_message_id": int(job["user_message_id"]),
+        "status": job["status"],
+        "attempts": int(job.get("attempts") or 0),
+        "error_message": job.get("error_message"),
+        "assistant_message": assistant_message,
+        "created_at": job.get("created_at"),
+        "started_at": job.get("started_at"),
+        "completed_at": job.get("completed_at"),
+        "updated_at": job.get("updated_at"),
+    })
+
+
+@app.post("/api/v2/inbox/jobs/{job_id}/retry")
+def v2_retry_inbox_job(
+    job_id: int,
+    background_tasks: BackgroundTasks,
+    x_api_key: str | None = Header(None),
+):
+    auth(x_api_key)
+    with db() as conn:
+        job = retry_inbox_job(conn, int(job_id))
+        if job is None:
+            job = get_processing_job(conn, int(job_id))
+            if not job:
+                raise HTTPException(404, "V2 Inbox job was not found")
+            if job["status"] == "completed":
+                return json_safe({"job_id": int(job["id"]), "thread_id": int(job["thread_id"]), "status": "completed"})
+            if job["status"] not in {"queued", "processing"}:
+                raise HTTPException(409, "Only a failed V2 Inbox job can be retried")
+    background_tasks.add_task(_process_v2_inbox_job, int(job["id"]))
+    return JSONResponse(
+        status_code=202,
+        content=json_safe({
+            "job_id": int(job["id"]),
+            "thread_id": int(job["thread_id"]),
+            "status": job["status"],
+        }),
+    )
 
 
 @app.get("/api/v2/inbox/threads/{thread_id}")

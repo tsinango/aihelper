@@ -101,7 +101,176 @@ def list_thread_messages(conn, thread_id: int) -> list[dict]:
 
 
 def thread_response(conn, thread_id: int) -> dict:
-    return {"thread": get_thread(conn, thread_id), "messages": list_thread_messages(conn, thread_id)}
+    return {
+        "thread": get_thread(conn, thread_id),
+        "messages": list_thread_messages(conn, thread_id),
+        "jobs": list_active_jobs(conn, thread_id),
+    }
+
+
+def list_active_jobs(conn, thread_id: int) -> list[dict]:
+    """Return durable work that a refreshed Inbox should continue polling."""
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, thread_id, raw_evidence_id, user_message_id,
+                   idempotency_key, status, error_message, attempts,
+                   created_at, started_at, completed_at, updated_at
+            FROM v2_inbox_processing_jobs
+            WHERE thread_id=%s AND status IN ('queued', 'processing')
+            ORDER BY id
+            """,
+            (thread_id,),
+        )
+        return [_dict(row) for row in cur.fetchall()]
+
+
+def create_processing_job(
+    conn,
+    *,
+    thread_id: int,
+    raw_evidence_id: int,
+    user_message_id: int,
+    idempotency_key: str,
+) -> dict:
+    """Create one queued job; the caller owns the surrounding transaction."""
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO v2_inbox_processing_jobs(
+                thread_id, raw_evidence_id, user_message_id, idempotency_key,
+                status
+            )
+            VALUES(%s, %s, %s, %s, 'queued')
+            RETURNING id, thread_id, raw_evidence_id, user_message_id,
+                      idempotency_key, status, error_message, attempts,
+                      created_at, started_at, completed_at, updated_at
+            """,
+            (thread_id, raw_evidence_id, user_message_id, idempotency_key),
+        )
+        return _dict(cur.fetchone())
+
+
+def get_processing_job(conn, job_id: int) -> dict | None:
+    """Load a job and the first assistant response produced after its input."""
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT j.id, j.thread_id, j.raw_evidence_id, j.user_message_id,
+                   j.idempotency_key, j.status, j.error_message, j.attempts,
+                   j.created_at, j.started_at, j.completed_at, j.updated_at,
+                   m.id AS assistant_message_id,
+                   m.content AS assistant_message,
+                   m.message_type AS assistant_message_type
+            FROM v2_inbox_processing_jobs j
+            LEFT JOIN LATERAL (
+                SELECT id, content, message_type
+                FROM v2_inbox_messages
+                WHERE thread_id=j.thread_id AND role='assistant'
+                  AND sequence_no > (
+                      SELECT sequence_no FROM v2_inbox_messages WHERE id=j.user_message_id
+                  )
+                ORDER BY sequence_no, id
+                LIMIT 1
+            ) m ON TRUE
+            WHERE j.id=%s
+            """,
+            (job_id,),
+        )
+        row = cur.fetchone()
+    return _dict(row) if row else None
+
+
+def claim_processing_job(conn, job_id: int) -> dict | None:
+    """Atomically let one background invocation own a queued job."""
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE v2_inbox_processing_jobs
+            SET status='processing', attempts=attempts + 1,
+                started_at=COALESCE(started_at, CURRENT_TIMESTAMP),
+                error_message=NULL, updated_at=CURRENT_TIMESTAMP
+            WHERE id=%s AND status='queued'
+            RETURNING id, thread_id, raw_evidence_id, user_message_id,
+                      idempotency_key, status, error_message, attempts,
+                      created_at, started_at, completed_at, updated_at
+            """,
+            (job_id,),
+        )
+        row = cur.fetchone()
+    return _dict(row) if row else None
+
+
+def complete_processing_job(conn, job_id: int) -> dict | None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE v2_inbox_processing_jobs
+            SET status='completed', completed_at=CURRENT_TIMESTAMP,
+                error_message=NULL, updated_at=CURRENT_TIMESTAMP
+            WHERE id=%s AND status='processing'
+            RETURNING id, thread_id, raw_evidence_id, user_message_id,
+                      idempotency_key, status, error_message, attempts,
+                      created_at, started_at, completed_at, updated_at
+            """,
+            (job_id,),
+        )
+        row = cur.fetchone()
+    return _dict(row) if row else None
+
+
+def fail_processing_job(conn, job_id: int, error_message: str = "处理失败") -> dict | None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE v2_inbox_processing_jobs
+            SET status='failed', error_message=%s, updated_at=CURRENT_TIMESTAMP
+            WHERE id=%s AND status='processing'
+            RETURNING id, thread_id, raw_evidence_id, user_message_id,
+                      idempotency_key, status, error_message, attempts,
+                      created_at, started_at, completed_at, updated_at
+            """,
+            (str(error_message or "处理失败")[:1000], job_id),
+        )
+        row = cur.fetchone()
+    return _dict(row) if row else None
+
+
+def retry_processing_job(conn, job_id: int) -> dict | None:
+    """Requeue only a failed job; its evidence and user message stay intact."""
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE v2_inbox_processing_jobs
+            SET status='queued', error_message=NULL, completed_at=NULL,
+                started_at=NULL, updated_at=CURRENT_TIMESTAMP
+            WHERE id=%s AND status='failed'
+            RETURNING id, thread_id, raw_evidence_id, user_message_id,
+                      idempotency_key, status, error_message, attempts,
+                      created_at, started_at, completed_at, updated_at
+            """,
+            (job_id,),
+        )
+        row = cur.fetchone()
+    return _dict(row) if row else None
+
+
+def list_unfinished_job_ids(conn) -> list[int]:
+    """Expose only ids for optional process recovery at application startup."""
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id FROM v2_inbox_processing_jobs
+            WHERE status IN ('queued', 'processing') ORDER BY id
+            """
+        )
+        return [int(row["id"]) for row in cur.fetchall()]
 
 
 def list_threads(conn, *, limit: int = 30) -> list[dict]:

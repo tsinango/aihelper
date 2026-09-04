@@ -1312,6 +1312,8 @@ def learn_turn(
     llm_service=None,
     embedding_client=None,
     question_budget: int = 5,
+    persisted_evidence: dict | None = None,
+    persisted_user_message: dict | None = None,
 ) -> dict:
     """Persist one expert turn and advance exactly one atomic confirmation."""
 
@@ -1355,7 +1357,9 @@ def learn_turn(
             pending_question=pending.get("clarification_question") if pending else None,
             has_pending=bool(pending or pending_batch),
         )
-        evidence = _insert_evidence(conn, clean, current_thread_id, channel=channel, input_mode=mode)
+        evidence = persisted_evidence or _insert_evidence(
+            conn, clean, current_thread_id, channel=channel, input_mode=mode
+        )
         reply_kind = classify_reply(clean) if (pending or pending_batch) else "new"
         message_type = {
             "confirm": "confirmation",
@@ -1364,7 +1368,7 @@ def learn_turn(
             "skip": "skip",
             "correction": "correction",
         }.get(reply_kind, "evidence")
-        user_message = _insert_message(
+        user_message = persisted_user_message or _insert_message(
             conn, current_thread_id, "user", message_type, clean, int(evidence["id"])
         )
 
