@@ -54,7 +54,7 @@ def load_env_file(path: Path) -> None:
 
 
 def main() -> None:
-    load_env_file(Path(os.getenv("AI_SALES_ENGINEER_ENV_FILE", "/etc/ai-sales-engineer.env")))
+    load_env_file(Path(os.getenv("AIHELPER_ENV_FILE", "/etc/aihelper.env")))
     database_url = os.environ["DATABASE_URL"]
     token = read_openrouter_token(os.getenv("OPENROUTER_TOKEN_FILE", str(Path(__file__).with_name("openrouter"))))
     if not token:

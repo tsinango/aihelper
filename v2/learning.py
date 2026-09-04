@@ -29,7 +29,7 @@ from v2.service import create_thread, get_thread, json_safe, thread_response
 from psycopg.types.json import Jsonb
 
 
-log = logging.getLogger("ai-sales-engineer.v2.learning")
+log = logging.getLogger("aihelper.v2.learning")
 
 TRUST_VALUES = frozenset({
     "official_source", "user_confirmed", "provisional", "conflicted",

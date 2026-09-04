@@ -97,7 +97,7 @@
 <body>
   <header class="topbar">
     <a class="brand" href="/inbox">aihelper</a>
-    <nav class="nav" aria-label="主导航"><a class="active" href="/inbox">Inbox</a><a href="/knowledge">Knowledge</a><a href="/documents">Documents</a><a href="/chat">Chat</a></nav>
+    <nav class="nav" aria-label="主导航"><a class="active" href="/inbox">Inbox</a><a href="/knowledge">Knowledge</a><a href="/documents">Documents</a></nav>
     <div class="stats" aria-label="知识概况">
       <span>知识库 <strong id="count-knowledge">—</strong></span>
       <span>本周 <strong id="count-week">—</strong></span>
@@ -148,8 +148,9 @@
     const POLL_RETRY_MAX_MS = 10000;
     const MAX_POLL_FAILURES = 12;
     const THINKING_SLOW_MS = 10000;
+    const WORKER_UNAVAILABLE_MESSAGE = '后台知识处理服务暂时不可用。内容已经保存，后台处理恢复后会继续。';
     const isCoarse = typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia('(pointer: coarse)').matches;
-    const state = {threads: [], threadId: null, lastMessages: [], inboxRequest: 0, threadRequest: 0, sending: false, failedContent: '', requestKey: '', activeJob: null, failedJob: null, pollTimer: 0, pollFailures: 0, thinkingStartedAt: 0, slowTimer: 0};
+    const state = {threads: [], threadId: null, lastMessages: [], inboxRequest: 0, threadRequest: 0, sending: false, failedContent: '', requestKey: '', activeJob: null, failedJob: null, workerHealthy: null, workerUnavailable: false, pollTimer: 0, pollFailures: 0, thinkingStartedAt: 0, slowTimer: 0};
     const keyInput = $('api-key');
     if (keyInput) keyInput.value = getStoredKey();
 
@@ -247,6 +248,28 @@
       if (pending) pending.textContent = countValue(data, 'pending_count', 'pending');
       const gaps = $('count-gaps');
       if (gaps) gaps.textContent = countValue(data, 'unresolved_gap_count', 'unresolved_gaps', 'gaps', 'gap_count');
+    }
+
+    function updateWorkerState(data) {
+      const worker = data && data.worker;
+      if (!worker || typeof worker.healthy !== 'boolean') return;
+      state.workerHealthy = worker.healthy;
+      state.workerUnavailable = !worker.healthy;
+      if (worker.healthy) clearError();
+      else showError(WORKER_UNAVAILABLE_MESSAGE);
+    }
+
+    function reportWorkerUnavailable() {
+      state.workerHealthy = false;
+      state.workerUnavailable = true;
+      state.activeJob = null;
+      state.failedJob = null;
+      hideThinking();
+      setRetryLabel('重新连接');
+      showError(WORKER_UNAVAILABLE_MESSAGE);
+      showChatError(WORKER_UNAVAILABLE_MESSAGE);
+      renderThreads();
+      updateComposerDisabled();
     }
 
     function sourceLabels(sources) {
@@ -386,6 +409,7 @@
         const data = await api('/api/v2/inbox');
         if (request !== state.inboxRequest) return;
         updateCounts(data);
+        updateWorkerState(data);
         state.threads = listFrom(data);
         renderThreads();
         const idOf = thread => String(value(thread, 'id', 'thread_id'));
@@ -502,6 +526,10 @@
         state.activeJob = data;
         state.pollFailures = 0;
         if (data.status === 'queued' || data.status === 'processing') {
+          if (data.worker_healthy === false) {
+            reportWorkerUnavailable();
+            return;
+          }
           clearChatError();
           showThinking(data.status);
           updateComposerDisabled();
@@ -549,6 +577,10 @@
     function resumeActiveJob(jobs) {
       const active = Array.isArray(jobs) ? jobs.find(job => ['queued', 'processing'].includes(job.status)) : null;
       if (!active) return;
+      if (state.workerHealthy === false) {
+        reportWorkerUnavailable();
+        return;
+      }
       const normalized = normalizeJob(active);
       if (!normalized) {
         showChatError('任务状态缺少编号，请刷新后重试。');
@@ -710,6 +742,11 @@
     $('drawer-backdrop').addEventListener('click', closeDrawer);
     $('new-thread').addEventListener('click', startNewThread);
     $('chat-error-retry').addEventListener('click', () => {
+      if (state.workerUnavailable) {
+        state.workerUnavailable = false;
+        loadInbox();
+        return;
+      }
       if (state.failedJob) return retryJob(state.failedJob);
       if (state.activeJob) {
         state.pollFailures = 0;

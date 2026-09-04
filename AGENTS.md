@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-This is **AI Sales Engineer** (also referred to as `aihelper`), a Python
+This is **aihelper**, a Python
 FastAPI service backed by PostgreSQL (with pgvector) that answers customer
 questions about Hikvision-family security products in Russian. OpenRouter is
 the sole model provider: Nemotron 3 Ultra (`nvidia/nemotron-3-ultra-550b-a55b:free`)
@@ -62,8 +62,10 @@ systemd, batch jobs, review workflow), `TECHNICAL_STATUS_AND_REMEDIATION.md`
 - `templates/` — V2 pages (`inbox.html`, `knowledge.html`, `documents.html`,
   `chat.html`, Chinese UI). `review.html` and `published.html` at repo root
   serve the V1 review UI.
-- `schema.sql` + `migrations/` — additive SQL migrations `001`–`014`;
-  `013_v2_skeleton.sql` and `014_v2_learning_compare.sql` are the V2 tables.
+- `schema.sql` + `migrations/` — additive SQL migrations `001`–`017`;
+  `013_v2_skeleton.sql` through `016_v2_inbox_processing_jobs.sql` are the V2
+  learning/job tables, and `017_v2_inbox_worker_heartbeat.sql` is operational
+  worker liveness state.
   `apply_migration.py` records SHA-256 checksums in `schema_migrations` and
   rejects changed or out-of-tree migration files.
 - Batch/offline scripts (top level): `organize_telegram_knowledge.py`
@@ -108,18 +110,23 @@ Apply schema changes (migrations must live in `migrations/`):
 .venv/bin/python apply_migration.py migrations/<file>.sql
 ```
 
-Production runs as the systemd unit `ai-sales-engineer` (working directory
+Production runs as the systemd units `aihelper.service` and
+`aihelper-inbox-worker.service` (working directory
 `/opt/aihelper`, uvicorn on `127.0.0.1:8000`); see `OPERATIONS.md` for
 start/stop/log commands.
 
 ## Configuration & Security
 
-Non-secret configuration lives in `/etc/ai-sales-engineer.env` (mode 600):
+Non-secret configuration lives in `/etc/aihelper.env` (root:ubuntu, mode 640 so
+the systemd service user can read it):
 
 ```dotenv
 OPENROUTER_TOKEN_FILE=/opt/aihelper/openrouter
 OPENROUTER_TIMEOUT_SECONDS=120
 OPENROUTER_RERANK_ENABLED=true
+INBOX_WORKER_NAME=aihelper-inbox-worker
+INBOX_WORKER_HEARTBEAT_INTERVAL_SECONDS=10
+INBOX_WORKER_HEALTHY_THRESHOLD_SECONDS=45
 ```
 
 Secrets are the OpenRouter token (`/opt/aihelper/openrouter`, mode 600, or

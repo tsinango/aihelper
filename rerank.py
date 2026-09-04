@@ -89,7 +89,7 @@ class OpenRouterReranker:
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
-            "X-Title": "AI Sales Engineer",
+            "X-Title": "aihelper",
         }
         if self.client is not None:
             return self.client.post(OPENROUTER_RERANK_URL, headers=headers, json=payload, timeout=self.timeout)

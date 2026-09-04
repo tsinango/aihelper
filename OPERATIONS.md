@@ -1,33 +1,133 @@
-# AI Sales Engineer operations
+# aihelper operations
 
-Start:
+Production consists of two systemd processes:
+
+- `aihelper.service` — FastAPI web backend on `127.0.0.1:8000`.
+- `aihelper-inbox-worker.service` — durable PostgreSQL-backed Inbox worker.
+
+Start the web service:
 
 ```bash
-sudo systemctl start ai-sales-engineer
+sudo systemctl start aihelper
 ```
 
-Stop:
+Start the Inbox worker:
 
 ```bash
-sudo systemctl stop ai-sales-engineer
+sudo systemctl start aihelper-inbox-worker
+```
+
+Stop both services before maintenance:
+
+```bash
+sudo systemctl stop aihelper-inbox-worker
+sudo systemctl stop aihelper
 ```
 
 Restart:
 
 ```bash
-sudo systemctl restart ai-sales-engineer
+sudo systemctl restart aihelper
+sudo systemctl restart aihelper-inbox-worker
 ```
 
 Status:
 
 ```bash
-sudo systemctl status ai-sales-engineer
+systemctl status aihelper
+systemctl status aihelper-inbox-worker
 ```
 
 Logs:
 
 ```bash
-journalctl -u ai-sales-engineer -f
+journalctl -u aihelper -f
+journalctl -u aihelper-inbox-worker -f
+```
+
+## Service and environment migration
+
+The checked-in units are `deploy/aihelper.service` and
+`deploy/aihelper-inbox-worker.service`. The Python executable below is the
+confirmed existing `/opt/aihelper/.venv/bin/python` path; it resolves to
+`/usr/bin/python3.10` in this checkout.
+
+If the old environment file is still the only copy, preserve it and create the
+new protected file:
+
+```bash
+sudo cp /etc/ai-sales-engineer.env /etc/aihelper.env
+sudo chown root:ubuntu /etc/aihelper.env
+sudo chmod 640 /etc/aihelper.env
+sudo stat -c '%n %U:%G %a' /etc/aihelper.env
+```
+
+Do not store the environment file or its secrets in Git. Keep the old file as
+a backup until the migration has been verified; it is not used by the new
+units.
+
+Apply the additive heartbeat migration before starting the new worker:
+
+```bash
+sudo -u ubuntu /opt/aihelper/.venv/bin/python /opt/aihelper/apply_migration.py \
+  --env-file /etc/aihelper.env migrations/017_v2_inbox_worker_heartbeat.sql
+```
+
+Install and switch units without allowing both web services to bind port
+8000. Stop the old Web unit first. This host currently has the old worker
+running as an unmanaged process rather than an installed unit; inspect the
+exact PID and stop it before starting the replacement:
+
+```bash
+sudo systemctl stop ai-sales-engineer.service
+ps -ef | rg '[w]orker.py'
+# After verifying the PID is the old /opt/aihelper/worker.py process:
+sudo kill <old-worker-pid>
+sudo install -o root -g root -m 0644 deploy/aihelper.service /etc/systemd/system/aihelper.service
+sudo install -o root -g root -m 0644 deploy/aihelper-inbox-worker.service /etc/systemd/system/aihelper-inbox-worker.service
+sudo systemctl daemon-reload
+sudo systemctl enable aihelper.service aihelper-inbox-worker.service
+sudo systemctl start aihelper.service
+sudo systemctl start aihelper-inbox-worker.service
+sudo systemctl status aihelper --no-pager
+sudo systemctl status aihelper-inbox-worker --no-pager
+sudo systemctl disable ai-sales-engineer.service
+```
+
+Do not remove the old units or environment backup until `/health`, `/ready`,
+and Inbox polling have been verified after the switch.
+
+After a reboot, verify both units are enabled and active, then check the
+endpoints and recent journal output:
+
+```bash
+systemctl is-enabled aihelper aihelper-inbox-worker
+systemctl is-active aihelper aihelper-inbox-worker
+curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8000/ready
+journalctl -u aihelper -b --no-pager -n 50
+journalctl -u aihelper-inbox-worker -b --no-pager -n 50
+```
+
+If the web service is active but Inbox jobs do not progress, inspect the
+worker status and journal first. Durable jobs remain in PostgreSQL and can be
+checked with:
+
+```bash
+systemctl status aihelper-inbox-worker --no-pager
+journalctl -u aihelper-inbox-worker -n 100 --no-pager
+sudo -u postgres psql -d ai_sales_engineer -c \
+  "select id,status,attempts,updated_at from v2_inbox_processing_jobs order by updated_at desc limit 20"
+```
+
+Use the Inbox retry action after the worker is healthy; do not run a second
+worker manually against the same queue.
+
+Health checks:
+
+```bash
+curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8000/ready
 ```
 
 PostgreSQL check:
@@ -39,7 +139,8 @@ sudo -u postgres psql -d ai_sales_engineer -c "select count(*) from document_chu
 
 OpenRouter configuration uses the raw token file
 `/opt/aihelper/openrouter` (mode 600) and the protected environment
-file `/etc/ai-sales-engineer.env` (mode 600). Provider and model slugs are
+file `/etc/aihelper.env` (root:ubuntu, mode 640 so the systemd service user can
+read it). Provider and model slugs are
 fixed in source.
 
 Required variables:
@@ -48,6 +149,9 @@ Required variables:
 OPENROUTER_TOKEN_FILE=/opt/aihelper/openrouter
 OPENROUTER_TIMEOUT_SECONDS=120
 OPENROUTER_RERANK_ENABLED=true
+INBOX_WORKER_NAME=aihelper-inbox-worker
+INBOX_WORKER_HEARTBEAT_INTERVAL_SECONDS=10
+INBOX_WORKER_HEALTHY_THRESHOLD_SECONDS=45
 ```
 
 ## 本机 Qwen 离线评测
@@ -61,9 +165,9 @@ Telegram 或 `/api/v1/query` 流量。`evaluate_local_qwen.py` 会在同一轮�
 先确认生产仍由 OpenRouter 提供模型，再运行完整 golden benchmark：
 
 ```bash
-sudo systemctl status ai-sales-engineer --no-pager
+sudo systemctl status aihelper --no-pager
 .venv/bin/python evaluate_local_qwen.py \
-  --env-file /etc/ai-sales-engineer.env \
+  --env-file /etc/aihelper.env \
   --models 2b,4b --limit 135 --mode golden \
   --output data/local_qwen_golden_v2.json
 ```
@@ -92,7 +196,7 @@ PostgreSQL 不在线时可使用 `--no-database`；该模式只读 golden set �
 
 ```bash
 .venv/bin/python evaluate_local_qwen.py \
-  --env-file /etc/ai-sales-engineer.env \
+  --env-file /etc/aihelper.env \
   --models 2b --limit 2 --mode smoke \
   --output data/local_qwen_2b_smoke.json
 ```
@@ -129,7 +233,7 @@ To resume the V1.1 intent batch with the accelerated configuration used in
 production (eight workers, twenty request starts per minute):
 
 ```bash
-sudo bash -c 'set -a; . /etc/ai-sales-engineer.env; set +a; export OPENROUTER_INTENT_WORKERS=8; export OPENROUTER_REQUESTS_PER_MINUTE=20; exec env PYTHONUNBUFFERED=1 /home/ubuntu/ai-sales-engineer-knowledge/.venv/bin/python /opt/aihelper/run_knowledge_intents_v1_1.py --env-file /etc/ai-sales-engineer.env'
+sudo bash -c 'set -a; . /etc/aihelper.env; set +a; export OPENROUTER_INTENT_WORKERS=8; export OPENROUTER_REQUESTS_PER_MINUTE=20; exec env PYTHONUNBUFFERED=1 /opt/aihelper/.venv/bin/python /opt/aihelper/run_knowledge_intents_v1_1.py --env-file /etc/aihelper.env'
 ```
 
 The batch input currently contains 591 cases. Check progress without opening
@@ -142,7 +246,7 @@ cat data/knowledge_intent_rate_limit_v1_1.json
 ```
 
 Update code from this checkout, then run
-`sudo systemctl restart ai-sales-engineer`. The service working directory is
+`sudo systemctl restart aihelper`. The service working directory is
 `/opt/aihelper`; there is no `oracle/` or `public/` source directory
 in this repository.
 

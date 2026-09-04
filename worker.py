@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -17,15 +18,31 @@ from embeddings import (
 )
 from llm import OPENROUTER_DEFAULT_MODEL, OpenRouterLLM
 from v2.processing import process_inbox_job, recover_inbox_jobs
-from v2.service import list_queued_job_ids
+from v2.service import (
+    INBOX_WORKER_HEARTBEAT_INTERVAL_SECONDS,
+    INBOX_WORKER_NAME,
+    list_queued_job_ids,
+    record_worker_heartbeat,
+)
 
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
-log = logging.getLogger("ai-sales-engineer.inbox-worker")
+log = logging.getLogger("aihelper.inbox-worker")
 
 
 def db():
     return psycopg.connect(os.environ["DATABASE_URL"], row_factory=dict_row)
+
+
+def _heartbeat_loop(stop_event: threading.Event) -> None:
+    """Keep liveness independent from a potentially long LLM request."""
+    while not stop_event.is_set():
+        try:
+            with db() as conn:
+                record_worker_heartbeat(conn, INBOX_WORKER_NAME)
+        except Exception:
+            log.exception("Inbox worker heartbeat failed")
+        stop_event.wait(INBOX_WORKER_HEARTBEAT_INTERVAL_SECONDS)
 
 
 def main() -> None:
@@ -63,20 +80,32 @@ def main() -> None:
             question_budget=question_budget,
         )
 
-    # Requeue jobs left in processing by a worker or host restart before
-    # entering the normal FIFO polling loop.
-    recover_inbox_jobs(db_factory=db, process_job=run_job)
-    while True:
-        try:
-            with db() as conn:
-                job_ids = list_queued_job_ids(conn, limit=1)
-            if job_ids:
-                run_job(job_ids[0])
-            else:
-                time.sleep(1)
-        except Exception:
-            log.exception("Inbox worker loop failed; retrying")
-            time.sleep(5)
+    stop_event = threading.Event()
+    heartbeat = threading.Thread(
+        target=_heartbeat_loop,
+        args=(stop_event,),
+        name="inbox-worker-heartbeat",
+        daemon=True,
+    )
+    heartbeat.start()
+    try:
+        # Requeue jobs left in processing by a worker or host restart before
+        # entering the normal FIFO polling loop.
+        recover_inbox_jobs(db_factory=db, process_job=run_job)
+        while True:
+            try:
+                with db() as conn:
+                    job_ids = list_queued_job_ids(conn, limit=1)
+                if job_ids:
+                    run_job(job_ids[0])
+                else:
+                    time.sleep(1)
+            except Exception:
+                log.exception("Inbox worker loop failed; retrying")
+                time.sleep(5)
+    finally:
+        stop_event.set()
+        heartbeat.join(timeout=INBOX_WORKER_HEARTBEAT_INTERVAL_SECONDS)
 
 
 if __name__ == "__main__":

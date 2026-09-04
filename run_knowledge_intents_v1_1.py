@@ -973,7 +973,7 @@ def main() -> int:
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
     parser.add_argument("--output-json", type=Path, default=DEFAULT_OUTPUT_JSON)
     parser.add_argument("--output-markdown", type=Path, default=DEFAULT_OUTPUT_MARKDOWN)
-    parser.add_argument("--env-file", type=Path, default=Path("/etc/ai-sales-engineer.env"))
+    parser.add_argument("--env-file", type=Path, default=Path("/etc/aihelper.env"))
     args = parser.parse_args()
     try:
         summary = build_artifacts(args)

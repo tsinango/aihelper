@@ -187,7 +187,7 @@ def load_rows(cur) -> list[dict]:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--env-file", type=Path, default=Path("/etc/ai-sales-engineer.env"))
+    parser.add_argument("--env-file", type=Path, default=Path("/etc/aihelper.env"))
     parser.add_argument(
         "--artifact", type=Path,
         default=Path(__file__).with_name("data") / "knowledge_intents_v1_1_openrouter.json",

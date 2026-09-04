@@ -529,7 +529,7 @@ def main() -> int:
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
     parser.add_argument("--output-json", type=Path, default=Path("/opt/aihelper/data/topic_candidates_v2.json"))
     parser.add_argument("--output-markdown", type=Path, default=Path("/opt/aihelper/TOPIC_REVIEW_V2.md"))
-    parser.add_argument("--env-file", type=Path, default=Path("/etc/ai-sales-engineer.env"))
+    parser.add_argument("--env-file", type=Path, default=Path("/etc/aihelper.env"))
     args = parser.parse_args()
     try:
         summary = run(args)

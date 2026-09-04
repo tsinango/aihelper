@@ -16,7 +16,7 @@ from build_verified_knowledge_pilot import load_env_file
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("migration", type=Path)
-    parser.add_argument("--env-file", type=Path, default=Path("/etc/ai-sales-engineer.env"))
+    parser.add_argument("--env-file", type=Path, default=Path("/etc/aihelper.env"))
     args = parser.parse_args()
     load_env_file(args.env_file)
     migration_path = args.migration.resolve()

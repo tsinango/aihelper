@@ -7,6 +7,7 @@ the caller, and the V2 tables are never mixed with V1 candidate/review tables.
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 
 
@@ -14,8 +15,65 @@ class V2NotFound(LookupError):
     """Raised when a requested V2 thread does not exist."""
 
 
+# Keep worker liveness policy in one place so the API, worker, and Inbox UI
+# agree on what "healthy" means.
+INBOX_WORKER_NAME = os.getenv("INBOX_WORKER_NAME", "aihelper-inbox-worker")
+INBOX_WORKER_HEARTBEAT_INTERVAL_SECONDS = max(
+    5.0, float(os.getenv("INBOX_WORKER_HEARTBEAT_INTERVAL_SECONDS", "10"))
+)
+INBOX_WORKER_HEALTHY_THRESHOLD_SECONDS = max(
+    INBOX_WORKER_HEARTBEAT_INTERVAL_SECONDS * 2,
+    float(os.getenv("INBOX_WORKER_HEALTHY_THRESHOLD_SECONDS", "45")),
+)
+
+
 def _dict(row: Any) -> dict:
     return dict(row) if row is not None else {}
+
+
+def record_worker_heartbeat(conn, worker_name: str = INBOX_WORKER_NAME) -> dict:
+    """Record one worker liveness pulse; the caller owns the transaction."""
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO v2_inbox_workers(worker_name, last_seen_at)
+            VALUES(%s, CURRENT_TIMESTAMP)
+            ON CONFLICT (worker_name) DO UPDATE
+              SET last_seen_at=CURRENT_TIMESTAMP
+            RETURNING worker_name, last_seen_at
+            """,
+            (str(worker_name),),
+        )
+        return _dict(cur.fetchone())
+
+
+def worker_health(conn, worker_name: str = INBOX_WORKER_NAME) -> dict:
+    """Return a non-secret liveness snapshot for the dedicated Inbox worker."""
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT worker_name, last_seen_at,
+                   EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - last_seen_at))
+                     AS age_seconds
+            FROM v2_inbox_workers
+            WHERE worker_name=%s
+            """,
+            (str(worker_name),),
+        )
+        row = cur.fetchone()
+    if not row:
+        return {
+            "worker_name": str(worker_name),
+            "last_seen_at": None,
+            "healthy": False,
+        }
+    result = _dict(row)
+    age_seconds = result.get("age_seconds")
+    result["healthy"] = age_seconds is not None and float(age_seconds) <= INBOX_WORKER_HEALTHY_THRESHOLD_SECONDS
+    result.pop("age_seconds", None)
+    return result
 
 
 def create_thread(
@@ -162,10 +220,14 @@ def get_processing_job(conn, job_id: int) -> dict | None:
             SELECT j.id, j.thread_id, j.raw_evidence_id, j.user_message_id,
                    j.idempotency_key, j.status, j.error_message, j.attempts,
                    j.created_at, j.started_at, j.completed_at, j.updated_at,
+                   (w.last_seen_at IS NOT NULL AND
+                    EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - w.last_seen_at)) <= %s)
+                     AS worker_healthy,
                    m.id AS assistant_message_id,
                    m.content AS assistant_message,
                    m.message_type AS assistant_message_type
             FROM v2_inbox_processing_jobs j
+            LEFT JOIN v2_inbox_workers w ON w.worker_name=%s
             LEFT JOIN LATERAL (
                 SELECT id, content, message_type
                 FROM v2_inbox_messages
@@ -178,7 +240,7 @@ def get_processing_job(conn, job_id: int) -> dict | None:
             ) m ON TRUE
             WHERE j.id=%s
             """,
-            (job_id,),
+            (INBOX_WORKER_HEALTHY_THRESHOLD_SECONDS, INBOX_WORKER_NAME, job_id),
         )
         row = cur.fetchone()
     return _dict(row) if row else None
@@ -337,7 +399,11 @@ def summary(conn) -> dict:
 
 
 def inbox_snapshot(conn) -> dict:
-    return {"summary": summary(conn), "threads": list_threads(conn)}
+    return {
+        "summary": summary(conn),
+        "threads": list_threads(conn),
+        "worker": worker_health(conn),
+    }
 
 
 def list_knowledge(conn, *, limit: int = 100) -> list[dict]:

@@ -1,0 +1,22 @@
+[Unit]
+Description=aihelper Inbox Worker
+After=network-online.target postgresql.service aihelper.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/aihelper
+EnvironmentFile=/etc/aihelper.env
+ExecStart=/opt/aihelper/.venv/bin/python /opt/aihelper/worker.py
+Restart=always
+RestartSec=5
+TimeoutStopSec=15
+NoNewPrivileges=true
+PrivateTmp=true
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

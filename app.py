@@ -44,6 +44,7 @@ from llm import OPENROUTER_DEFAULT_MODEL, OPENROUTER_PROVIDER, LLMService, OpenR
 from logging_security import install_telegram_logging_redaction, register_telegram_bot_token
 from telegram_relations import classify_message, message_evidence_status, message_id
 from v2.service import (
+    INBOX_WORKER_HEALTHY_THRESHOLD_SECONDS,
     V2NotFound,
     get_processing_job,
     inbox_snapshot,
@@ -51,6 +52,7 @@ from v2.service import (
     list_documents,
     list_knowledge,
     thread_response,
+    worker_health,
 )
 from v2.learning import learn_turn
 from v2.processing import (
@@ -62,7 +64,7 @@ from v2.processing import (
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 install_telegram_logging_redaction()
-log = logging.getLogger("ai-sales-engineer")
+log = logging.getLogger("aihelper")
 FAILURE = "Не удалось подтвердить по доступным документам."
 SERVICE_ERROR = "Сервис временно недоступен. Попробуйте повторить запрос позже."
 AI_DERIVED_NOTICE = "⚠️ Ответ сформирован AI на основе доступных материалов и исторических обращений; он ещё не подтверждён специалистом.\n\n"
@@ -893,37 +895,51 @@ async def lifespan(_app: FastAPI):
     yield
 
 
-app = FastAPI(title="AI Sales Engineer", lifespan=lifespan)
+app = FastAPI(title="aihelper", lifespan=lifespan)
 
 
 @app.get("/health")
 def health():
-    try:
-        with db() as conn, conn.cursor() as cur:
-            cur.execute("SELECT 1")
-        return {
-            "status": "ok",
-            "database": "ok",
-            "embedding_model": "loaded" if embedder else "not_loaded",
-            "llm": "configured" if llm else "not_configured",
-            "reranker": "configured" if reranker else "not_configured",
-        }
-    except Exception:
-        return {
-            "status": "error",
-            "database": "error",
-            "embedding_model": "loaded" if embedder else "not_loaded",
-            "llm": "configured" if llm else "not_configured",
-            "reranker": "configured" if reranker else "not_configured",
-        }
+    """Report only that the Web process is serving requests."""
+    return {"status": "ok", "service": "aihelper"}
+
+
+def _ready_failure(reason: str) -> JSONResponse:
+    return JSONResponse(status_code=503, content={"ready": False, "reason": reason})
 
 
 @app.get("/ready")
 def ready():
-    result = health()
-    if result["status"] != "ok" or not embedder or not llm:
-        raise HTTPException(503, result)
-    return result
+    """Check dependencies required for production work, without exposing secrets."""
+    try:
+        with db() as conn, conn.cursor() as cur:
+            cur.execute("SELECT 1")
+            cur.execute(
+                """
+                SELECT to_regclass('public.questions') AS questions,
+                       to_regclass('public.v2_knowledge') AS v2_knowledge,
+                       to_regclass('public.v2_inbox_processing_jobs') AS jobs,
+                       to_regclass('public.v2_inbox_workers') AS workers
+                """
+            )
+            schema = cur.fetchone()
+            if not schema or not all(schema.get(name) for name in ("questions", "v2_knowledge", "jobs", "workers")):
+                return _ready_failure("schema_unavailable")
+            worker = worker_health(conn)
+    except Exception:
+        log.warning("readiness database check failed", exc_info=True)
+        return _ready_failure("database_unavailable")
+
+    if not worker.get("healthy"):
+        return _ready_failure("inbox_worker_unavailable")
+    if not embedder or not llm:
+        return _ready_failure("openrouter_unconfigured")
+    return {
+        "ready": True,
+        "service": "aihelper",
+        "worker": worker,
+        "worker_healthy_threshold_seconds": INBOX_WORKER_HEALTHY_THRESHOLD_SECONDS,
+    }
 
 
 @app.post("/telegram/webhook")
@@ -1810,6 +1826,7 @@ def v2_inbox_job(job_id: int, x_api_key: str | None = Header(None)):
         "user_message_id": int(job["user_message_id"]),
         "status": job["status"],
         "attempts": int(job.get("attempts") or 0),
+        "worker_healthy": job.get("worker_healthy"),
         "error_message": job.get("error_message"),
         "assistant_message": assistant_message,
         "created_at": job.get("created_at"),

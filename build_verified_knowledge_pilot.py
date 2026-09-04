@@ -840,7 +840,7 @@ def build(args) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--env-file", type=Path, default=Path("/etc/ai-sales-engineer.env"))
+    parser.add_argument("--env-file", type=Path, default=Path("/etc/aihelper.env"))
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--review", type=Path, default=DEFAULT_REVIEW)
     args = parser.parse_args()

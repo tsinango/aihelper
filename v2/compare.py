@@ -15,7 +15,7 @@ from typing import Any
 from llm import LLMService, parse_json_response
 
 
-log = logging.getLogger("ai-sales-engineer.v2.compare")
+log = logging.getLogger("aihelper.v2.compare")
 
 DECISIONS = frozenset({"NEW", "CONFIRM", "ENRICH", "CONFLICT", "UNCLEAR"})
 QUESTION_DECISIONS = frozenset({"CONFLICT", "UNCLEAR"})

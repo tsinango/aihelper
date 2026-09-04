@@ -248,7 +248,7 @@ def import_candidate(conn, candidate: dict, case_rows: dict[int, dict]) -> bool:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--env-file", type=Path, default=Path("/etc/ai-sales-engineer.env"))
+    parser.add_argument("--env-file", type=Path, default=Path("/etc/aihelper.env"))
     parser.add_argument("--input", type=Path, default=DEFAULT_INPUT)
     args = parser.parse_args()
     load_env_file(args.env_file)

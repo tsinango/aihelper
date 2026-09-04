@@ -29,7 +29,7 @@ from v2.service import (
 )
 
 
-log = logging.getLogger("ai-sales-engineer.v2.processing")
+log = logging.getLogger("aihelper.v2.processing")
 
 
 def _job_key(value: str | None) -> str:

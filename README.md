@@ -1,4 +1,4 @@
-# AI Sales Engineer
+# aihelper
 
 Current architecture status, confirmed production issues, and the recommended
 remediation plan are documented in
@@ -9,12 +9,15 @@ The service uses OpenRouter as its only model provider. `llm.complete()`,
 OpenRouter token is kept in the protected `openrouter` file (or supplied via
 `OPENROUTER_API_KEY`).
 
-Configure the following non-secret variables in `/etc/ai-sales-engineer.env`:
+Configure the following non-secret variables in `/etc/aihelper.env`:
 
 ```dotenv
 OPENROUTER_TOKEN_FILE=/opt/aihelper/openrouter
 OPENROUTER_TIMEOUT_SECONDS=120
 OPENROUTER_RERANK_ENABLED=true
+INBOX_WORKER_NAME=aihelper-inbox-worker
+INBOX_WORKER_HEARTBEAT_INTERVAL_SECONDS=10
+INBOX_WORKER_HEALTHY_THRESHOLD_SECONDS=45
 ```
 
 ## 本机 Qwen 评测（仅影子评测）
@@ -33,7 +36,7 @@ runner 会逐个启动 2B/4B，并把结果写入专用的 `local_model_eval_*` 
 
 ```bash
 .venv/bin/python evaluate_local_qwen.py \
-  --env-file /etc/ai-sales-engineer.env \
+  --env-file /etc/aihelper.env \
   --models 2b,4b --limit 135 --mode golden \
   --output data/local_qwen_golden_v2.json
 ```
@@ -42,7 +45,7 @@ runner 会逐个启动 2B/4B，并把结果写入专用的 `local_model_eval_*` 
 
 ```bash
 .venv/bin/python evaluate_local_qwen.py \
-  --env-file /etc/ai-sales-engineer.env \
+  --env-file /etc/aihelper.env \
   --models 2b,4b --limit 135 --mode golden --no-database \
   --output data/local_qwen_golden_v2.json
 ```

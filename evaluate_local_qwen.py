@@ -30,7 +30,7 @@ from psycopg.types.json import Jsonb
 from build_verified_knowledge_pilot import load_env_file
 
 
-DEFAULT_ENV_FILE = Path("/etc/ai-sales-engineer.env")
+DEFAULT_ENV_FILE = Path("/etc/aihelper.env")
 DEFAULT_OUTPUT = Path("data/local_qwen_smoke.json")
 DEFAULT_GOLDEN_SET = Path("data/golden_set.json")
 DEFAULT_GOLDEN_SOURCE = Path("data/telegram_knowledge_review.json")
