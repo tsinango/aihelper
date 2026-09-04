@@ -6,7 +6,7 @@
   <title>Inbox · aihelper V2</title>
   <style>
     :root{--bg:#f6f7f9;--panel:#fff;--line:#e5e7eb;--text:#17212b;--muted:#667085;--blue:#2563eb;--blue-soft:#eff6ff;--green:#15803d;--amber:#b45309;--red:#b42318;--shadow:0 1px 2px #1018280d}
-    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}button,input,textarea{font:inherit}button{border:1px solid #cbd5e1;border-radius:8px;background:#fff;color:var(--text);padding:8px 12px;cursor:pointer}button:hover{border-color:var(--blue);background:#f8fbff}button:disabled{opacity:.55;cursor:wait}.primary{background:var(--blue);border-color:var(--blue);color:#fff}.primary:hover{background:#1d4ed8;color:#fff}.shell{max-width:1240px;margin:0 auto;padding:0 20px}.topbar{display:flex;align-items:center;gap:18px;min-height:60px;border-bottom:1px solid var(--line);background:#fff}.brand{font-weight:750;color:var(--text);text-decoration:none;white-space:nowrap}.nav{display:flex;gap:4px}.nav a{color:var(--muted);text-decoration:none;padding:7px 10px;border-radius:7px}.nav a:hover,.nav a.active{background:var(--blue-soft);color:var(--blue)}.keybox{display:flex;align-items:center;gap:7px;margin-left:auto;color:var(--muted);font-size:12px}.keybox input{width:170px;border:1px solid #cbd5e1;border-radius:7px;padding:7px 8px}.key-status{color:var(--muted);white-space:nowrap}.page{padding:22px 0 30px}.page-heading{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin-bottom:16px}.page-heading h1{font-size:25px;line-height:1.2;margin:0 0 4px}.page-heading p{margin:0;color:var(--muted)}.counts{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px}.count{padding:7px 11px;background:#fff;border:1px solid var(--line);border-radius:9px;color:var(--muted)}.count strong{color:var(--text);margin-left:4px}.count.pending strong{color:var(--amber)}.count.gap strong{color:var(--red)}.workspace{display:grid;grid-template-columns:320px minmax(0,1fr);min-height:610px;background:var(--panel);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);overflow:hidden}.threads{border-right:1px solid var(--line);display:flex;flex-direction:column}.panel-heading{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid var(--line)}.panel-heading h2{font-size:15px;margin:0}.thread-list{padding:8px;overflow:auto}.thread-item{display:block;width:100%;text-align:left;border:1px solid transparent;border-radius:9px;padding:11px 10px;margin-bottom:4px;background:#fff}.thread-item:hover{background:#f8fafc;border-color:var(--line)}.thread-item.active{background:var(--blue-soft);border-color:#bfdbfe}.thread-item strong{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.thread-item small{display:block;color:var(--muted);margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.thread-item time{display:block;color:var(--muted);font-size:11px;margin-top:5px}.chat{display:flex;flex-direction:column;min-width:0}.chat-heading{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:14px 18px;border-bottom:1px solid var(--line)}.chat-heading h2{font-size:15px;margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.chat-heading span{font-size:12px;color:var(--muted)}.messages{flex:1;overflow:auto;padding:22px 20px;background:#fbfcfe}.empty{padding:45px 20px;text-align:center;color:var(--muted)}.empty strong{display:block;color:var(--text);font-size:16px;margin-bottom:5px}.message-row{display:flex;margin:0 0 14px}.message-row.user{justify-content:flex-end}.bubble{max-width:min(76%,680px);padding:10px 13px;border-radius:13px;background:#fff;border:1px solid var(--line);white-space:pre-wrap;overflow-wrap:anywhere}.message-row.user .bubble{background:var(--blue);border-color:var(--blue);color:#fff;border-bottom-right-radius:4px}.message-row.assistant .bubble{border-bottom-left-radius:4px}.message-meta{font-size:11px;color:var(--muted);margin:0 5px 4px}.message-row.user .message-meta{text-align:right}.sources{margin-top:8px;padding-top:7px;border-top:1px solid #edf0f3;font-size:11px;color:var(--muted)}.composer{padding:13px 16px;border-top:1px solid var(--line);background:#fff}.composer-row{display:flex;gap:8px;align-items:flex-end}.composer textarea{flex:1;min-height:42px;max-height:140px;resize:vertical;border:1px solid #cbd5e1;border-radius:9px;padding:10px 11px}.composer textarea:focus,.keybox input:focus{outline:2px solid #bfdbfe;border-color:var(--blue)}.composer-note{margin-top:6px;color:var(--muted);font-size:11px}.error{color:var(--red);background:#fff1f0;border:1px solid #fecaca;border-radius:8px;padding:9px 11px;margin:10px 0}.status-dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:#94a3b8;margin-right:5px}.status-dot.ok{background:#22c55e}@media(max-width:780px){.shell{padding:0 10px}.topbar{flex-wrap:wrap;padding:10px 0;gap:7px}.keybox{width:100%;margin-left:0}.keybox input{flex:1}.workspace{display:flex;flex-direction:column;min-height:0}.threads{border-right:0;border-bottom:1px solid var(--line);max-height:240px}.messages{min-height:420px}.bubble{max-width:88%}.page-heading{display:block}.page-heading .button{margin-top:10px}}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}button,input,textarea{font:inherit}button{border:1px solid #cbd5e1;border-radius:8px;background:#fff;color:var(--text);padding:8px 12px;cursor:pointer}button:hover{border-color:var(--blue);background:#f8fbff}button:disabled{opacity:.55;cursor:wait}.primary{background:var(--blue);border-color:var(--blue);color:#fff}.primary:hover{background:#1d4ed8;color:#fff}.shell{max-width:1240px;margin:0 auto;padding:0 20px}.topbar{display:flex;align-items:center;gap:18px;min-height:60px;border-bottom:1px solid var(--line);background:#fff}.topbar>.shell{flex-wrap:wrap}.brand{font-weight:750;color:var(--text);text-decoration:none;white-space:nowrap}.nav{display:flex;gap:4px;overflow-x:auto}.nav a{color:var(--muted);text-decoration:none;padding:7px 10px;border-radius:7px;white-space:nowrap}.nav a:hover,.nav a.active{background:var(--blue-soft);color:var(--blue)}.keybox{display:flex;align-items:center;gap:7px;margin-left:auto;color:var(--muted);font-size:12px}.keybox input{width:170px;border:1px solid #cbd5e1;border-radius:7px;padding:7px 8px}.key-status{color:var(--muted);white-space:nowrap}.page{padding:22px 0 30px}.page-heading{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin-bottom:16px}.page-heading h1{font-size:25px;line-height:1.2;margin:0 0 4px}.page-heading p{margin:0;color:var(--muted)}.counts{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px}.count{padding:7px 11px;background:#fff;border:1px solid var(--line);border-radius:9px;color:var(--muted)}.count strong{color:var(--text);margin-left:4px}.count.pending strong{color:var(--amber)}.count.gap strong{color:var(--red)}.workspace{display:grid;grid-template-columns:320px minmax(0,1fr);min-height:610px;background:var(--panel);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);overflow:hidden}.threads{border-right:1px solid var(--line);display:flex;flex-direction:column}.panel-heading{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid var(--line)}.panel-heading h2{font-size:15px;margin:0}.thread-list{padding:8px;overflow:auto}.thread-item{display:block;width:100%;text-align:left;border:1px solid transparent;border-radius:9px;padding:11px 10px;margin-bottom:4px;background:#fff}.thread-item:hover{background:#f8fafc;border-color:var(--line)}.thread-item.active{background:var(--blue-soft);border-color:#bfdbfe}.thread-item strong{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.thread-item small{display:block;color:var(--muted);margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.thread-item time{display:block;color:var(--muted);font-size:11px;margin-top:5px}.chat{display:flex;flex-direction:column;min-width:0}.chat-heading{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:14px 18px;border-bottom:1px solid var(--line)}.chat-heading h2{font-size:15px;margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.chat-heading span{font-size:12px;color:var(--muted)}.messages{flex:1;overflow:auto;padding:22px 20px;background:#fbfcfe}.empty{padding:45px 20px;text-align:center;color:var(--muted)}.empty strong{display:block;color:var(--text);font-size:16px;margin-bottom:5px}.message-row{display:flex;margin:0 0 14px}.message-row.user{justify-content:flex-end}.bubble{max-width:min(76%,680px);padding:10px 13px;border-radius:13px;background:#fff;border:1px solid var(--line);white-space:pre-wrap;overflow-wrap:anywhere}.message-row.user .bubble{background:var(--blue);border-color:var(--blue);color:#fff;border-bottom-right-radius:4px}.message-row.assistant .bubble{border-bottom-left-radius:4px}.message-meta{font-size:11px;color:var(--muted);margin:0 5px 4px}.message-row.user .message-meta{text-align:right}.sources{margin-top:8px;padding-top:7px;border-top:1px solid #edf0f3;font-size:11px;color:var(--muted)}.composer{padding:13px 16px;border-top:1px solid var(--line);background:#fff}.composer-row{display:flex;gap:8px;align-items:flex-end}.composer textarea{flex:1;min-height:42px;max-height:140px;resize:vertical;border:1px solid #cbd5e1;border-radius:9px;padding:10px 11px}.composer textarea:focus,.keybox input:focus{outline:2px solid #bfdbfe;border-color:var(--blue)}.composer-note{margin-top:6px;color:var(--muted);font-size:11px}.error{color:var(--red);background:#fff1f0;border:1px solid #fecaca;border-radius:8px;padding:9px 11px;margin:10px 0}.status-dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:#94a3b8;margin-right:5px}.status-dot.ok{background:#22c55e}@media(max-width:780px){.shell{padding:0 10px}.topbar{flex-wrap:wrap;padding:10px 0;gap:7px}.topbar>.shell{flex-wrap:wrap}.keybox{width:100%;margin-left:0}.keybox input{flex:1}.workspace{display:flex;flex-direction:column;min-height:0}.threads{border-right:0;border-bottom:1px solid var(--line);max-height:240px}.messages{min-height:420px}.bubble{max-width:88%}.page-heading{display:block}.page-heading .button{margin-top:10px}}
   </style>
 </head>
 <body>
@@ -26,25 +26,212 @@
   </main>
   <script>
     const $ = id => document.getElementById(id);
-    const state = {threads: [], threadId: null};
+    const state = {threads: [], threadId: null, inboxRequest: 0, threadRequest: 0};
     const keyInput = $('api-key');
     keyInput.value = sessionStorage.getItem('x-api-key') || '';
-    function setKey(value){sessionStorage.setItem('x-api-key', value.trim());$('key-status').textContent=value.trim()?'已保存':'未设置'}
-    setKey(keyInput.value); keyInput.addEventListener('change', () => {setKey(keyInput.value); loadInbox()});
-    const headers = json => ({'x-api-key': sessionStorage.getItem('x-api-key') || '', ...(json ? {'Content-Type':'application/json'} : {})});
-    async function api(path, options={}){const response=await fetch(path,{...options,headers:{...headers(Boolean(options.body)),...(options.headers||{})}});let data=null;try{data=await response.json()}catch(_){data={}}if(!response.ok)throw new Error(data.detail || data.message || `请求失败（${response.status}）`);return data}
-    function listFrom(data){return Array.isArray(data)?data:(data.items||data.threads||data.results||[])}
-    function value(item,...keys){for(const key of keys)if(item&&item[key]!=null)return item[key];return ''}
-    function displayDate(value){if(!value)return '';const date=new Date(value);return Number.isNaN(date.getTime())?String(value):date.toLocaleString('zh-CN',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'})}
-    function updateCounts(data){const counts=data.counts||data.summary||{};$('count-knowledge').textContent=value(counts,'knowledge','knowledge_count')||value(data,'knowledge_count')||'—';$('count-week').textContent=value(counts,'week_new','new_this_week')||value(data,'week_new')||'—';$('count-pending').textContent=value(counts,'pending','pending_count')||value(data,'pending_count')||'—';$('count-gaps').textContent=value(counts,'gaps','unresolved_gaps','gap_count')||value(data,'unresolved_gaps')||'—'}
-    function renderThreads(){const box=$('thread-list');box.replaceChildren();if(!state.threads.length){box.innerHTML='<div class="empty">还没有对话。<br>在右侧发送第一条消息。</div>';return}$('thread-count').textContent=`${state.threads.length} 个`;for(const thread of state.threads){const button=document.createElement('button');button.className='thread-item'+(String(value(thread,'id','thread_id'))===String(state.threadId)?' active':'');const title=value(thread,'title','subject','preview')||'未命名对话';const preview=value(thread,'last_message','last_content','preview')||'暂无消息';button.innerHTML=`<strong></strong><small></small><time></time>`;button.querySelector('strong').textContent=title;button.querySelector('small').textContent=preview;button.querySelector('time').textContent=displayDate(value(thread,'updated_at','created_at'));button.onclick=()=>openThread(value(thread,'id','thread_id'));box.append(button)}}
-    function renderMessages(data){const messages=listFrom(data.messages?data:data);const box=$('messages');box.replaceChildren();if(!messages.length){box.innerHTML='<div class="empty"><strong>从一句话开始</strong>这里会保留完整对话。</div>';return}for(const item of messages){const role=String(value(item,'role','sender_type','author')||'assistant').toLowerCase();const user=['user','human','me','customer'].includes(role);const row=document.createElement('div');row.className='message-row '+(user?'user':'assistant');const wrap=document.createElement('div');const meta=document.createElement('div');meta.className='message-meta';meta.textContent=user?'我':'aihelper';const bubble=document.createElement('div');bubble.className='bubble';bubble.textContent=value(item,'content','text','message','body');const sources=value(item,'sources','source');if(sources&&(Array.isArray(sources)?sources.length:true)){const sourceBox=document.createElement('div');sourceBox.className='sources';sourceBox.textContent='来源：'+(Array.isArray(sources)?sources.map(x=>typeof x==='string'?x:value(x,'title','name','label')).join('、'):sources);bubble.append(sourceBox)}wrap.append(meta,bubble);row.append(wrap);box.append(row)}box.scrollTop=box.scrollHeight}
-    async function openThread(id){if(!id)return;state.threadId=id;renderThreads();$('thread-title').textContent='正在打开…';$('thread-state').textContent='';try{const data=await api(`/api/v2/inbox/threads/${encodeURIComponent(id)}`);const thread=data.thread||data;$('thread-title').textContent=value(thread,'title','subject')||'对话';$('thread-state').textContent=value(thread,'status','state')||'';renderMessages(thread)}catch(error){showError(error.message);$('thread-title').textContent='无法打开对话'}}
-    async function loadInbox(){clearError();try{const data=await api('/api/v2/inbox');updateCounts(data);state.threads=listFrom(data);renderThreads();if(state.threadId)await openThread(state.threadId);else if(state.threads[0])await openThread(value(state.threads[0],'id','thread_id'))}catch(error){showError(error.message);state.threads=[];renderThreads()}}
-    async function sendMessage(content){const button=$('#composer button');button.disabled=true;try{const body={content};if(state.threadId)body.thread_id=state.threadId;const data=await api('/api/v2/inbox/messages',{method:'POST',body:JSON.stringify(body)});if(data.thread_id)state.threadId=data.thread_id;if(data.messages){renderMessages(data)}else if(data.thread){const thread=data.thread;if(data.thread_id&&!thread.id)thread.id=data.thread_id;renderMessages(thread)}else{const input=$('message-input');const row={role:'user',content};renderMessages({messages:[...listFrom($('messages')),row]})}await loadInbox()}catch(error){showError(error.message)}finally{button.disabled=false}}
-    $('composer').addEventListener('submit',event=>{event.preventDefault();const input=$('message-input');const content=input.value.trim();if(!content)return;input.value='';sendMessage(content)});
-    $('message-input').addEventListener('keydown',event=>{if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();$('composer').requestSubmit()}});$('refresh').onclick=loadInbox;
-    function showError(message){$('page-error').textContent=message;$('page-error').hidden=false}function clearError(){$('page-error').hidden=true}
+
+    function setKey(value) {
+      const clean = value.trim();
+      sessionStorage.setItem('x-api-key', clean);
+      $('key-status').textContent = clean ? '已保存' : '未设置';
+    }
+
+    setKey(keyInput.value);
+    keyInput.addEventListener('change', () => { setKey(keyInput.value); loadInbox(); });
+
+    function headers(json) {
+      return {'x-api-key': sessionStorage.getItem('x-api-key') || '', ...(json ? {'Content-Type': 'application/json'} : {})};
+    }
+
+    async function api(path, options = {}) {
+      if (!sessionStorage.getItem('x-api-key')) throw new Error('请先在顶部填写 API Key');
+      let response;
+      try {
+        response = await fetch(path, {...options, headers: {...headers(Boolean(options.body)), ...(options.headers || {})}});
+      } catch (_) {
+        throw new Error('无法连接服务，请确认 API 已启动');
+      }
+      let data = {};
+      try { data = await response.json(); } catch (_) { /* empty or non-JSON response */ }
+      if (!response.ok) throw new Error(data.detail || data.message || `请求失败（${response.status}）`);
+      return data;
+    }
+
+    function listFrom(data) {
+      if (Array.isArray(data)) return data;
+      if (!data || typeof data !== 'object') return [];
+      const result = data.items || data.threads || data.results || [];
+      return Array.isArray(result) ? result : [];
+    }
+
+    function value(item, ...keys) {
+      for (const key of keys) if (item && item[key] != null) return item[key];
+      return '';
+    }
+
+    function displayDate(raw) {
+      if (!raw) return '';
+      const date = new Date(raw);
+      return Number.isNaN(date.getTime()) ? String(raw) : date.toLocaleString('zh-CN', {month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit'});
+    }
+
+    function countValue(data, ...keys) {
+      const sources = [data && data.summary, data && data.counts, data];
+      for (const source of sources) {
+        for (const key of keys) if (source && source[key] != null) return source[key];
+      }
+      return '—';
+    }
+
+    function updateCounts(data) {
+      $('count-knowledge').textContent = countValue(data, 'knowledge_count', 'knowledge');
+      $('count-week').textContent = countValue(data, 'week_new_count', 'week_new', 'new_this_week');
+      $('count-pending').textContent = countValue(data, 'pending_count', 'pending');
+      $('count-gaps').textContent = countValue(data, 'unresolved_gap_count', 'unresolved_gaps', 'gaps', 'gap_count');
+    }
+
+    function sourceLabels(sources) {
+      if (sources == null || sources === '') return [];
+      const list = Array.isArray(sources) ? sources : [sources];
+      return list.map(source => typeof source === 'string' ? source : value(source, 'title', 'name', 'label', 'filename')).filter(Boolean).map(String);
+    }
+
+    function renderThreads() {
+      const box = $('thread-list');
+      box.replaceChildren();
+      $('thread-count').textContent = state.threads.length ? `${state.threads.length} 个` : '';
+      if (!state.threads.length) {
+        box.innerHTML = '<div class="empty">还没有对话。<br>在右侧发送第一条消息。</div>';
+        return;
+      }
+      for (const thread of state.threads) {
+        const id = value(thread, 'id', 'thread_id');
+        const button = document.createElement('button');
+        button.className = 'thread-item' + (String(id) === String(state.threadId) ? ' active' : '');
+        button.type = 'button';
+        button.innerHTML = '<strong></strong><small></small><time></time>';
+        button.querySelector('strong').textContent = value(thread, 'title', 'subject', 'preview') || '未命名对话';
+        button.querySelector('small').textContent = value(thread, 'last_message', 'last_content', 'preview') || '暂无消息';
+        button.querySelector('time').textContent = displayDate(value(thread, 'updated_at', 'created_at'));
+        button.onclick = () => openThread(id);
+        box.append(button);
+      }
+    }
+
+    function renderMessages(data) {
+      const messages = data && Array.isArray(data.messages) ? data.messages : listFrom(data);
+      const box = $('messages');
+      box.replaceChildren();
+      if (!messages.length) {
+        box.innerHTML = '<div class="empty"><strong>从一句话开始</strong>这里会保留完整对话。</div>';
+        return;
+      }
+      for (const item of messages) {
+        const role = String(value(item, 'role', 'sender_type', 'author') || 'assistant').toLowerCase();
+        const user = ['user', 'human', 'me', 'customer'].includes(role);
+        const row = document.createElement('div');
+        row.className = 'message-row ' + (user ? 'user' : 'assistant');
+        const wrap = document.createElement('div');
+        const meta = document.createElement('div');
+        meta.className = 'message-meta';
+        meta.textContent = user ? '我' : 'aihelper';
+        const bubble = document.createElement('div');
+        bubble.className = 'bubble';
+        bubble.textContent = String(value(item, 'content', 'text', 'message', 'body'));
+        const labels = sourceLabels(value(item, 'sources', 'source'));
+        if (labels.length) {
+          const sourceBox = document.createElement('div');
+          sourceBox.className = 'sources';
+          sourceBox.textContent = '来源：' + labels.join('、');
+          bubble.append(sourceBox);
+        }
+        wrap.append(meta, bubble);
+        row.append(wrap);
+        box.append(row);
+      }
+      box.scrollTop = box.scrollHeight;
+    }
+
+    async function openThread(id) {
+      if (!id) return;
+      state.threadId = id;
+      const request = ++state.threadRequest;
+      renderThreads();
+      $('thread-title').textContent = '正在打开…';
+      $('thread-state').textContent = '';
+      try {
+        const data = await api(`/api/v2/inbox/threads/${encodeURIComponent(id)}`);
+        if (request !== state.threadRequest) return;
+        const thread = data.thread || data;
+        $('thread-title').textContent = value(thread, 'title', 'subject', 'preview') || '对话';
+        $('thread-state').textContent = value(thread, 'status', 'state') || '';
+        renderMessages(data);
+      } catch (error) {
+        if (request !== state.threadRequest) return;
+        showError(error.message);
+        $('thread-title').textContent = '无法打开对话';
+      }
+    }
+
+    async function loadInbox() {
+      const request = ++state.inboxRequest;
+      clearError();
+      try {
+        const data = await api('/api/v2/inbox');
+        if (request !== state.inboxRequest) return;
+        updateCounts(data);
+        state.threads = listFrom(data);
+        if (!state.threads.some(thread => String(value(thread, 'id', 'thread_id')) === String(state.threadId))) state.threadId = null;
+        renderThreads();
+        if (state.threadId) await openThread(state.threadId);
+        else if (state.threads[0]) await openThread(value(state.threads[0], 'id', 'thread_id'));
+        else renderMessages([]);
+      } catch (error) {
+        if (request !== state.inboxRequest) return;
+        showError(error.message);
+        state.threads = [];
+        state.threadId = null;
+        renderThreads();
+        renderMessages([]);
+      }
+    }
+
+    async function sendMessage(content) {
+      const button = $('#composer button');
+      button.disabled = true;
+      try {
+        const body = {content};
+        if (state.threadId) body.thread_id = state.threadId;
+        const data = await api('/api/v2/inbox/messages', {method: 'POST', body: JSON.stringify(body)});
+        if (data.thread_id) state.threadId = data.thread_id;
+        renderMessages(data.messages ? data : data.thread ? data.thread : {messages: [{role: 'user', content}]});
+        await loadInbox();
+      } catch (error) {
+        const input = $('message-input');
+        if (!input.value) input.value = content;
+        showError(error.message);
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    $('composer').addEventListener('submit', event => {
+      event.preventDefault();
+      const input = $('message-input');
+      const content = input.value.trim();
+      if (!content) return;
+      input.value = '';
+      sendMessage(content);
+    });
+    $('message-input').addEventListener('keydown', event => {
+      if (event.key === 'Enter' && !event.shiftKey) {
+        event.preventDefault();
+        $('composer').requestSubmit();
+      }
+    });
+    $('refresh').onclick = loadInbox;
+    function showError(message) { $('page-error').textContent = message; $('page-error').hidden = false; }
+    function clearError() { $('page-error').hidden = true; }
     loadInbox();
   </script>
 </body>
