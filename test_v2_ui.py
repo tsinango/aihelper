@@ -57,6 +57,24 @@ class V2UiTest(unittest.TestCase):
             self.assertIn("请先在设置中保存 API Key", content, page)
             self.assertNotIn('<label class="keybox"', content, page)
 
+    def test_inbox_chat_reliability_contract(self):
+        content = (ROOT / "templates" / "inbox.html").read_text()
+        self.assertIn("cache: CACHE_MODE", content)
+        self.assertIn("no-store", content)
+        self.assertIn("AbortController", content)
+        self.assertIn("REQUEST_TIMEOUT_MS", content)
+        self.assertIn("正在理解你的内容", content)
+        self.assertIn("请重试", content)
+        self.assertIn('id="chat-error-retry"', content)
+        self.assertIn("我来回答", content)
+        self.assertIn("inbox-thread-id", content)
+        self.assertIn("state.sending", content)
+        self.assertIn("pointer: coarse", content)
+        self.assertIn("matchMedia", content)
+        self.assertIn("100dvh", content)
+        self.assertIn("quickReplyLabels", content)
+        self.assertIn('id="new-thread"', content)
+
     @unittest.skipUnless(shutil.which("node"), "node is not installed")
     def test_all_inline_scripts_parse(self):
         checker = (
