@@ -15,6 +15,13 @@ from typing import Any
 
 from llm import parse_json_response
 
+from v2.bulk import (
+    classify_input_mode,
+    deduplicate_knowledge,
+    parse_batch_confirmation,
+    requires_individual_confirmation,
+    segment_bulk_text,
+)
 from v2.compare import compare_and_ask, safe_question
 from v2.retrieval import retrieve_learning_knowledge, store_knowledge_embedding
 from v2.service import create_thread, get_thread, json_safe, thread_response
@@ -34,19 +41,32 @@ PROPOSAL_STATUSES = frozenset({
 CONFIRM_WORDS = frozenset({
     "对", "对的", "正确", "没错", "是的", "确认", "是", "yes", "true", "y",
 })
+NEGATIVE_WORDS = frozenset({
+    "否", "不是", "不对", "不正确", "no", "false", "n", "нет",
+})
 UNKNOWN_WORDS = frozenset({"不知道", "不清楚", "不确定", "не знаю", "неизвестно"})
 SKIP_WORDS = frozenset({"跳过", "以后再说", "稍后再说", "先不说", "skip", "later"})
 
+_BINARY_QUESTION_MARKERS = (
+    "是否", "是不是", "能否", "可否", "有无", "有没有", "对吗", "正确吗",
+    "да или нет", "верно ли", "является ли", "ли?",
+)
+
 UNDERSTANDING_SYSTEM_PROMPT = """
 你是一个产品知识学习助理。你正在和产品专家聊天，不是在维护数据库。
-从用户刚刚提供的文字中提炼一个或多个原子事实，返回严格 JSON：
-{"facts":[{"title":"简短标题","content":"一个可独立确认的事实","entity_name":"明确型号或产品名，没有就空字符串"}]}
+从用户刚刚提供的文字中完整提炼所有原子事实，返回严格 JSON：
+{"facts":[{"title":"简短标题","content":"一个可独立确认的事实","entity_name":"明确型号或产品名，没有就空字符串","derived":false}]}
 
 硬规则：
 - 每个 facts 项只能包含一个事实；型号、系列范围、hardware revision、firmware、条件、例外和否定事实必须拆成不同项。
 - 不要把单型号推广到系列，不要推断用户没有写出的范围。
 - 手册或文字没有提到某功能，不等于不支持；只有明确写出不支持或用户明确确认，才可表达否定。
 - “大概”“可能”“应该”等不确定说法仍然只能作为待确认理解。
+- 原文中的“等 / etc. / и т.д.”表示当前列举非穷尽；保留这个含义，不要要求补齐列表。
+- 只提取原文明确表达的事实。不要为了“补完整”而询问数据规模、RAG、蒸馏、其他模型或任何原文没有提出的维度。
+- 必须处理输入中的每一个逻辑段和每一个编号条目；不要因为事实很多而省略、合并或截断。
+- 如果输入是编号列表，保留每一项的名称、类型、模型大小/类型、状态和条件（若原文有写）。
+- derived 只有在你确实做了原文之外的推断时才为 true；原文的忠实拆分或改写必须为 false。
 - 不要回答客户问题，不要使用训练知识，不要询问数据库字段或技术实现。
 - 只返回 JSON，不要 markdown，不要解释。
 """.strip()
@@ -57,16 +77,23 @@ def _clean(value: Any, limit: int = 12000) -> str:
 
 
 def classify_reply(content: str) -> str:
-    """Classify only exact short control replies; everything else is a correction."""
+    """Classify exact short controls; longer text remains product evidence."""
 
     normalized = re.sub(r"[\s。.!！?？,，]+", "", _clean(content, 200).casefold())
     if normalized in {item.casefold() for item in CONFIRM_WORDS}:
         return "confirm"
+    if normalized in {item.casefold() for item in NEGATIVE_WORDS}:
+        return "negative"
     if normalized in {item.casefold() for item in UNKNOWN_WORDS}:
         return "unknown"
     if normalized in {item.casefold() for item in SKIP_WORDS}:
         return "skip"
     return "correction"
+
+
+def _expected_answer_type(question: str | None) -> str:
+    text = str(question or "").strip().casefold()
+    return "binary" if any(marker in text for marker in _BINARY_QUESTION_MARKERS) else "free_text"
 
 
 def _entity_name(text: str) -> str:
@@ -84,7 +111,13 @@ def _fallback_facts(content: str) -> list[dict]:
     }]
 
 
-def _model_facts(content: str, llm_service=None, context: list[dict] | None = None) -> tuple[list[dict], bool]:
+def _model_facts(
+    content: str,
+    llm_service=None,
+    context: list[dict] | None = None,
+    *,
+    max_tokens: int = 1600,
+) -> tuple[list[dict], bool]:
     if llm_service is None:
         return _fallback_facts(content), True
     messages = [{"role": "system", "content": UNDERSTANDING_SYSTEM_PROMPT}]
@@ -100,7 +133,7 @@ def _model_facts(content: str, llm_service=None, context: list[dict] | None = No
         })
     messages.append({"role": "user", "content": content})
     try:
-        parsed = parse_json_response(llm_service.extract(messages, max_tokens=800))
+        parsed = parse_json_response(llm_service.extract(messages, max_tokens=max_tokens))
         raw_facts = parsed.get("facts") if isinstance(parsed, dict) else None
         if not isinstance(raw_facts, list):
             raw_facts = [parsed] if isinstance(parsed, dict) and parsed.get("content") else []
@@ -115,9 +148,10 @@ def _model_facts(content: str, llm_service=None, context: list[dict] | None = No
                 "title": _clean(item.get("title"), 500) or fact_content[:120],
                 "content": fact_content,
                 "entity_name": _clean(item.get("entity_name") or item.get("entity"), 500),
+                "derived": bool(item.get("derived") or item.get("inferred")),
             })
         if facts:
-            return facts[:20], False
+            return facts, False
     except Exception:
         log.exception("V2 learning understanding failed; keeping a provisional raw interpretation")
     return _fallback_facts(content), True
@@ -130,6 +164,7 @@ def _insert_evidence(
     *,
     channel: str = "inbox",
     label: str = "Inbox",
+    input_mode: str = "new_knowledge_payload",
 ) -> dict:
     with conn.cursor() as cur:
         cur.execute(
@@ -144,7 +179,7 @@ def _insert_evidence(
             """,
             (
                 content,
-                Jsonb({"thread_id": thread_id, "channel": channel}),
+                Jsonb({"thread_id": thread_id, "channel": channel, "input_mode": input_mode}),
                 label,
                 f"v2-thread:{thread_id}",
             ),
@@ -234,10 +269,12 @@ def _pending_proposal(conn, thread_id: int) -> dict | None:
                    confirmed_knowledge_id, resolution_message_id,
                    comparison_result, clarification_question,
                    comparison_reason, related_knowledge_ids,
+                   batch_id, segment_no, expected_answer_type, derived, individual_confirmation, paused,
                    created_at, updated_at
             FROM v2_learning_proposals
             WHERE thread_id=%s
               AND status IN ('pending_clarification', 'pending_confirmation')
+              AND paused=FALSE
             ORDER BY id LIMIT 1
             """,
             (thread_id,),
@@ -254,6 +291,7 @@ def _pending_context(conn, thread_id: int) -> list[dict]:
             FROM v2_learning_proposals
             WHERE thread_id=%s
               AND status IN ('pending_clarification', 'pending_confirmation')
+              AND paused=FALSE
             ORDER BY id
             """,
             (thread_id,),
@@ -330,6 +368,10 @@ def _insert_proposal(
     clarification_question: str = "",
     comparison_reason: str = "",
     related_knowledge_ids: list[int] | None = None,
+    batch_id: int | None = None,
+    segment_no: int | None = None,
+    derived: bool = False,
+    individual_confirmation: bool = False,
 ) -> dict:
     if decision not in {"NEW", "CONFIRM", "ENRICH", "CONFLICT", "UNCLEAR"}:
         raise ValueError(f"unknown V2 comparison result: {decision}")
@@ -342,14 +384,16 @@ def _insert_proposal(
                 thread_id, source_message_id, fact_text, entity_name,
                 proposed_trust, status, confirmed_knowledge_id,
                 comparison_result, clarification_question,
-                comparison_reason, related_knowledge_ids
+                comparison_reason, related_knowledge_ids, batch_id,
+                segment_no, expected_answer_type, derived, individual_confirmation
             )
-            VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id, thread_id, source_message_id, question_message_id,
                       fact_text, entity_name, proposed_trust, status,
                       confirmed_knowledge_id, resolution_message_id,
                       comparison_result, clarification_question,
                       comparison_reason, related_knowledge_ids,
+                      batch_id, segment_no, expected_answer_type, derived, individual_confirmation, paused,
                       created_at, updated_at
             """,
             (
@@ -364,6 +408,11 @@ def _insert_proposal(
                 clarification_question,
                 comparison_reason,
                 list(related_knowledge_ids or []),
+                batch_id,
+                segment_no,
+                _expected_answer_type(clarification_question),
+                bool(derived),
+                bool(individual_confirmation),
             ),
         )
         proposal = dict(cur.fetchone())
@@ -398,6 +447,8 @@ def _deduplicate_facts(facts: list[dict]) -> list[dict]:
             "title": _clean(fact.get("title"), 500) or content[:120],
             "content": content,
             "entity_name": entity_name,
+            "derived": bool(fact.get("derived")),
+            "individual_confirmation": bool(fact.get("individual_confirmation")),
         })
     return result
 
@@ -427,6 +478,31 @@ def _ask(conn, proposal: dict, session: dict) -> tuple[dict | None, str | None]:
         if proposal.get("status") == "pending_clarification"
         else "question"
     )
+    # A failed compare or a correction can produce the same safe question as
+    # an earlier proposal. Reuse the existing message instead of asking it
+    # again and incrementing the question counter.
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, thread_id, sequence_no, role, message_type, content,
+                   raw_evidence_id, created_at
+            FROM v2_inbox_messages
+            WHERE thread_id=%s AND role='assistant'
+              AND message_type IN ('question', 'clarification', 'batch_confirmation')
+              AND content=%s
+            ORDER BY id DESC LIMIT 1
+            """,
+            (proposal["thread_id"], text),
+        )
+        previous = cur.fetchone()
+    if previous:
+        message = dict(previous)
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE v2_learning_proposals SET question_message_id=%s, updated_at=CURRENT_TIMESTAMP WHERE id=%s",
+                (message["id"], proposal["id"]),
+            )
+        return message, text
     message = _insert_message(
         conn, int(proposal["thread_id"]), "assistant", message_type, text
     )
@@ -616,6 +692,8 @@ def _plan_fact(
     fact: dict,
     llm_service,
     embedding_client,
+    batch_id: int | None = None,
+    segment_no: int | None = None,
 ) -> dict:
     """Retrieve, compare, and persist one atomic next step."""
 
@@ -663,14 +741,426 @@ def _plan_fact(
         clarification_question=comparison.get("question") or "",
         comparison_reason=comparison.get("reason") or "",
         related_knowledge_ids=related_ids,
+        batch_id=batch_id,
+        segment_no=segment_no,
+        derived=bool(fact.get("derived")),
+        individual_confirmation=bool(fact.get("individual_confirmation")),
     )
+
+
+def _create_batch(conn, thread_id: int, evidence_id: int, raw_source: str, total_segments: int) -> dict:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO v2_learning_batches(
+                thread_id, raw_evidence_id, raw_source, total_segments
+            )
+            VALUES(%s, %s, %s, %s)
+            RETURNING id, thread_id, raw_evidence_id, raw_source,
+                      total_segments, processed_segments, failed_segments,
+                      clear_facts, unclear_items, conflicts, status,
+                      confirmation_message_id, created_at, updated_at
+            """,
+            (thread_id, evidence_id, raw_source, total_segments),
+        )
+        return dict(cur.fetchone())
+
+
+def _get_batch(conn, batch_id: int) -> dict | None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, thread_id, raw_evidence_id, raw_source,
+                   total_segments, processed_segments, failed_segments,
+                   clear_facts, unclear_items, conflicts, status,
+                   confirmation_message_id, created_at, updated_at
+            FROM v2_learning_batches WHERE id=%s
+            """,
+            (batch_id,),
+        )
+        row = cur.fetchone()
+    return dict(row) if row else None
+
+
+def _update_batch(
+    conn,
+    batch_id: int,
+    *,
+    processed_segments: int,
+    failed_segments: int,
+    clear_facts: list[dict],
+    unclear_items: list[dict],
+    conflicts: list[dict],
+    status: str | None = None,
+    confirmation_message_id: int | None = None,
+) -> dict:
+    if status is None:
+        if clear_facts:
+            status = "awaiting_confirmation"
+        elif unclear_items:
+            status = "awaiting_clarification"
+        elif failed_segments:
+            status = "partial"
+        else:
+            status = "completed"
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE v2_learning_batches
+            SET processed_segments=%s, failed_segments=%s,
+                clear_facts=%s, unclear_items=%s, conflicts=%s,
+                status=%s, confirmation_message_id=COALESCE(%s, confirmation_message_id),
+                updated_at=CURRENT_TIMESTAMP
+            WHERE id=%s
+            RETURNING id, thread_id, raw_evidence_id, raw_source,
+                      total_segments, processed_segments, failed_segments,
+                      clear_facts, unclear_items, conflicts, status,
+                      confirmation_message_id, created_at, updated_at
+            """,
+            (
+                processed_segments,
+                failed_segments,
+                Jsonb(clear_facts),
+                Jsonb(unclear_items),
+                Jsonb(conflicts),
+                status,
+                confirmation_message_id,
+                batch_id,
+            ),
+        )
+        return dict(cur.fetchone())
+
+
+def _pending_batch(conn, thread_id: int) -> dict | None:
+    if not hasattr(conn, "cursor"):
+        return None
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT b.id, b.thread_id, b.raw_evidence_id, b.raw_source,
+                   b.total_segments, b.processed_segments, b.failed_segments,
+                   b.clear_facts, b.unclear_items, b.conflicts, b.status,
+                   b.confirmation_message_id, b.created_at, b.updated_at
+            FROM v2_learning_batches b
+            WHERE b.thread_id=%s AND b.status IN (
+                'processing', 'awaiting_confirmation', 'awaiting_clarification', 'partial'
+            )
+              AND EXISTS (
+                  SELECT 1 FROM v2_learning_proposals p
+                  WHERE p.batch_id=b.id AND p.paused=FALSE
+                    AND p.status IN ('pending_confirmation', 'pending_clarification')
+              )
+            ORDER BY b.id LIMIT 1
+            """,
+            (thread_id,),
+        )
+        row = cur.fetchone()
+    return dict(row) if row else None
+
+
+def _pause_pending_proposals(conn, thread_id: int) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE v2_learning_proposals
+            SET paused=TRUE, updated_at=CURRENT_TIMESTAMP
+            WHERE thread_id=%s AND paused=FALSE
+              AND status IN ('pending_clarification', 'pending_confirmation')
+            """,
+            (thread_id,),
+        )
+
+
+def _resume_paused_proposals(conn, thread_id: int) -> None:
+    """Resume an older question only after all newer batch work is settled."""
+
+    if not hasattr(conn, "cursor"):
+        return
+    if _pending_batch(conn, thread_id):
+        return
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE v2_learning_proposals
+            SET paused=FALSE, updated_at=CURRENT_TIMESTAMP
+            WHERE thread_id=%s AND paused=TRUE
+              AND status IN ('pending_clarification', 'pending_confirmation')
+            """,
+            (thread_id,),
+        )
+
+
+def _batch_confirmation_text(conn, batch: dict) -> str:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT count(*) AS count
+            FROM v2_learning_proposals
+            WHERE batch_id=%s AND paused=FALSE AND status='pending_confirmation'
+              AND derived=FALSE AND individual_confirmation=FALSE
+            """,
+            (batch["id"],),
+        )
+        clear_count = int(cur.fetchone()["count"])
+        cur.execute(
+            """
+            SELECT count(*) AS count
+            FROM v2_learning_proposals
+            WHERE batch_id=%s AND paused=FALSE
+              AND (status='pending_clarification' OR (status='pending_confirmation' AND (derived=TRUE OR individual_confirmation=TRUE)))
+            """,
+            (batch["id"],),
+        )
+        unclear_count = int(cur.fetchone()["count"])
+    total = int(batch["total_segments"])
+    processed = int(batch["processed_segments"])
+    failed = int(batch["failed_segments"])
+    lines = [f"我收到这批资料，共 {total} 个逻辑条目。", f"- {processed}/{total} 项已处理。"]
+    if failed:
+        lines.append(f"- {failed} 项解析失败，我没有假装它们已经理解；请补发失败条目。")
+    if clear_count:
+        lines.extend([
+            f"我提取了 {clear_count} 条明确知识。它们都来自你刚才提供的资料，没有额外推断。",
+            "是否确认将这些明确事实一起保存？（也可以回复“确认第1、2项”进行部分确认。）",
+        ])
+    if unclear_count:
+        lines.append(f"另有 {unclear_count} 项需要单独确认或澄清，确认明确内容后我会逐项处理。")
+    return "\n".join(lines)
+
+
+def _batch_confirmation_message(conn, batch: dict) -> tuple[dict, str]:
+    text = _batch_confirmation_text(conn, batch)
+    if batch.get("confirmation_message_id"):
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, thread_id, sequence_no, role, message_type, content, raw_evidence_id, created_at FROM v2_inbox_messages WHERE id=%s",
+                (batch["confirmation_message_id"],),
+            )
+            previous = cur.fetchone()
+        if previous:
+            return dict(previous), previous["content"]
+    message = _insert_message(conn, int(batch["thread_id"]), "assistant", "batch_confirmation", text)
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE v2_learning_batches SET confirmation_message_id=%s, updated_at=CURRENT_TIMESTAMP WHERE id=%s",
+            (message["id"], batch["id"]),
+        )
+    return message, text
+
+
+def _batch_detail_message(conn, batch: dict) -> tuple[dict, str]:
+    """Render a readable detail view without introducing another UI workflow."""
+
+    lines = ["这批资料的明细："]
+    for item in batch.get("clear_facts") or []:
+        lines.append(f"- 第{item.get('segment_no')}项：{item.get('content')}")
+    for item in batch.get("unclear_items") or []:
+        suffix = "（需要澄清）"
+        lines.append(f"- 第{item.get('segment_no')}项：{item.get('content')}{suffix}")
+    if not (batch.get("clear_facts") or batch.get("unclear_items")):
+        lines.append("- 暂无可展示的已提取事实。")
+    message = _insert_message(conn, int(batch["thread_id"]), "assistant", "batch_confirmation", "\n".join(lines))
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE v2_learning_batches SET confirmation_message_id=%s, updated_at=CURRENT_TIMESTAMP WHERE id=%s",
+            (message["id"], batch["id"]),
+        )
+    return message, message["content"]
+
+
+def _confirm_batch(
+    conn,
+    batch: dict,
+    evidence: dict,
+    message: dict,
+    *,
+    segment_numbers: set[int] | None = None,
+    embedding_client=None,
+) -> int:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, thread_id, source_message_id, question_message_id,
+                   fact_text, entity_name, proposed_trust, status,
+                   confirmed_knowledge_id, resolution_message_id,
+                   comparison_result, clarification_question,
+                   comparison_reason, related_knowledge_ids,
+                   batch_id, segment_no, expected_answer_type, derived, individual_confirmation, paused,
+                   created_at, updated_at
+            FROM v2_learning_proposals
+            WHERE batch_id=%s AND paused=FALSE AND status='pending_confirmation'
+              AND derived=FALSE AND individual_confirmation=FALSE
+            ORDER BY segment_no, id
+            """,
+            (batch["id"],),
+        )
+        proposals = [dict(row) for row in cur.fetchall()]
+    selected = [
+        item for item in proposals
+        if segment_numbers is None or int(item.get("segment_no") or 0) in segment_numbers
+    ]
+    for proposal in selected:
+        _confirm(conn, proposal, evidence, message, embedding_client=embedding_client)
+    return len(selected)
+
+
+def _batch_is_settled(conn, batch_id: int) -> bool:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT count(*) AS count FROM v2_learning_proposals
+            WHERE batch_id=%s AND paused=FALSE
+              AND status IN ('pending_confirmation', 'pending_clarification')
+            """,
+            (batch_id,),
+        )
+        return int(cur.fetchone()["count"]) == 0
+
+
+def _refresh_batch_state(conn, batch: dict) -> dict:
+    """Recompute the small batch status after a confirmation or clarification."""
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+              count(*) FILTER (WHERE status='pending_confirmation' AND derived=FALSE AND individual_confirmation=FALSE AND paused=FALSE) AS clear_count,
+              count(*) FILTER (WHERE paused=FALSE AND (status='pending_clarification' OR (status='pending_confirmation' AND (derived=TRUE OR individual_confirmation=TRUE)))) AS unclear_count
+            FROM v2_learning_proposals WHERE batch_id=%s
+            """,
+            (batch["id"],),
+        )
+        counts = cur.fetchone()
+    if int(counts["clear_count"]) > 0:
+        status = "awaiting_confirmation"
+    elif int(counts["unclear_count"]) > 0:
+        status = "awaiting_clarification"
+    elif int(batch.get("failed_segments") or 0) > 0:
+        status = "partial"
+    else:
+        status = "completed"
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE v2_learning_batches SET status=%s, updated_at=CURRENT_TIMESTAMP WHERE id=%s",
+            (status, batch["id"]),
+        )
+    return _get_batch(conn, int(batch["id"])) or dict(batch, status=status)
+
+
+def _learn_bulk_turn(
+    conn,
+    *,
+    clean: str,
+    thread_id: int,
+    session: dict,
+    evidence: dict,
+    user_message: dict,
+    llm_service,
+    embedding_client,
+    had_pending: bool,
+) -> dict:
+    """Process every deterministic segment and leave only unresolved work pending."""
+
+    if had_pending:
+        # A new bulk payload is a new evidence unit. Existing questions remain
+        # intact and are resumed only after this batch is settled.
+        _pause_pending_proposals(conn, thread_id)
+    segments = segment_bulk_text(clean)
+    batch = _create_batch(conn, thread_id, int(evidence["id"]), clean, len(segments))
+    processed_segments = 0
+    failed_segments = 0
+    clear_facts: list[dict] = []
+    unclear_items: list[dict] = []
+    conflicts: list[dict] = []
+    fallback = False
+
+    for segment in segments:
+        segment_number = int(segment["segment_no"])
+        try:
+            facts, used_fallback = _model_facts(segment["text"], llm_service)
+            facts = _deduplicate_facts(facts)
+        except Exception:
+            log.exception("V2 bulk segment processing failed segment=%s", segment_number)
+            facts, used_fallback = [], True
+        # A fallback is a raw interpretation, not proof that the segment was
+        # understood. It remains in raw evidence and is reported as failed.
+        if used_fallback or not facts:
+            failed_segments += 1
+            fallback = True
+            continue
+        processed_segments += 1
+        for fact in facts:
+            fact["individual_confirmation"] = requires_individual_confirmation(fact)
+            proposal = _plan_fact(
+                conn,
+                thread_id=thread_id,
+                message_id=int(user_message["id"]),
+                evidence_id=int(evidence["id"]),
+                fact=fact,
+                llm_service=llm_service,
+                embedding_client=embedding_client,
+                batch_id=int(batch["id"]),
+                segment_no=segment_number,
+            )
+            item = {
+                "proposal_id": proposal.get("id"),
+                "segment_no": segment_number,
+                "content": fact["content"],
+                "derived": bool(fact.get("derived")),
+                "individual_confirmation": bool(fact.get("individual_confirmation")),
+            }
+            if (
+                proposal.get("status") == "pending_confirmation"
+                and not fact.get("derived")
+                and not fact.get("individual_confirmation")
+            ):
+                clear_facts.append(item)
+            elif proposal.get("status") == "pending_confirmation":
+                unclear_items.append(item | {"question": "这是基于原文之外的推断，需要单独确认。"})
+            elif proposal.get("comparison_result") == "CONFLICT":
+                conflicts.append(item)
+                unclear_items.append(item | {"question": proposal.get("clarification_question", "")})
+            else:
+                unclear_items.append(item | {"question": proposal.get("clarification_question", "")})
+
+    batch = _update_batch(
+        conn,
+        int(batch["id"]),
+        processed_segments=processed_segments,
+        failed_segments=failed_segments,
+        clear_facts=clear_facts,
+        unclear_items=unclear_items,
+        conflicts=conflicts,
+    )
+    question_message, _, active_proposal = _next_question(conn, thread_id, session)
+    if question_message:
+        return _result(
+            conn,
+            thread_id,
+            status=_awaiting_status(active_proposal),
+            message=question_message,
+            proposal=active_proposal,
+            batch=batch,
+            fallback=fallback,
+        )
+
+    if failed_segments:
+        response_text = (
+            f"这次收到 {len(segments)} 项，其中 {processed_segments} 项已理解，"
+            f"{failed_segments} 项解析失败。原始资料已保留，请补发失败条目。"
+        )
+        response = _insert_message(conn, thread_id, "assistant", "text", response_text)
+        return _result(conn, thread_id, status="bulk_partial", message=response, batch=batch, fallback=True)
+    _resume_paused_proposals(conn, thread_id)
+    response = _insert_message(conn, thread_id, "assistant", "text", "这批资料已处理完成，暂时没有需要确认的内容。")
+    return _result(conn, thread_id, status="bulk_completed", message=response, batch=batch)
 
 
 def _summary(conn, thread_id: int, session: dict) -> tuple[dict | None, str | None]:
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT k.title, k.content
+            SELECT k.id, k.title, k.content
             FROM v2_learning_proposals p
             JOIN v2_knowledge k ON k.id=p.confirmed_knowledge_id
             WHERE p.thread_id=%s AND p.status='confirmed'
@@ -679,7 +1169,7 @@ def _summary(conn, thread_id: int, session: dict) -> tuple[dict | None, str | No
             """,
             (thread_id, session["started_at"]),
         )
-        facts = [dict(row) for row in cur.fetchall()]
+        facts = deduplicate_knowledge(dict(row) for row in cur.fetchall())
         cur.execute(
             """
             SELECT status, count(*) AS count
@@ -691,9 +1181,26 @@ def _summary(conn, thread_id: int, session: dict) -> tuple[dict | None, str | No
             (thread_id, session["started_at"]),
         )
         outcomes = {row["status"]: int(row["count"]) for row in cur.fetchall()}
+        cur.execute(
+            """
+            SELECT COALESCE(sum(total_segments), 0) AS total,
+                   COALESCE(sum(processed_segments), 0) AS processed,
+                   COALESCE(sum(failed_segments), 0) AS failed
+            FROM v2_learning_batches
+            WHERE thread_id=%s AND created_at >= %s
+            """,
+            (thread_id, session["started_at"]),
+        )
+        batch_coverage = dict(cur.fetchone())
     corrected = outcomes.get("corrected", 0)
     unresolved = outcomes.get("unknown", 0) + outcomes.get("skipped", 0)
     lines = [f"今天我学会了 {len(facts)} 件事："]
+    if int(batch_coverage["total"]):
+        lines.append(
+            f"本次批量资料：{int(batch_coverage['processed'])}/{int(batch_coverage['total'])} 项已处理。"
+        )
+        if int(batch_coverage["failed"]):
+            lines.append(f"还有 {int(batch_coverage['failed'])} 项解析失败，原始内容已保留。")
     lines.extend(f"* {item['content']}" for item in facts)
     if not facts:
         lines.append("* 暂时没有新增已确认知识。")
@@ -717,6 +1224,25 @@ def _summary(conn, thread_id: int, session: dict) -> tuple[dict | None, str | No
 
 
 def _next_question(conn, thread_id: int, session: dict) -> tuple[dict | None, str | None, dict | None]:
+    batch = _pending_batch(conn, thread_id)
+    if batch:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT count(*) AS count FROM v2_learning_proposals
+                WHERE batch_id=%s AND paused=FALSE AND status='pending_confirmation'
+                  AND derived=FALSE AND individual_confirmation=FALSE
+                """,
+                (batch["id"],),
+            )
+            clear_count = int(cur.fetchone()["count"])
+        if clear_count:
+            message, _ = _batch_confirmation_message(conn, batch)
+            return message, message.get("content"), {
+                "batch_id": batch["id"],
+                "status": "pending_confirmation",
+                "batch": batch,
+            }
     proposal = _pending_proposal(conn, thread_id)
     if not proposal:
         return None, None, None
@@ -729,12 +1255,23 @@ def _next_question(conn, thread_id: int, session: dict) -> tuple[dict | None, st
     return message, text, proposal
 
 
-def _result(conn, thread_id: int, *, status: str, message: dict | None = None, proposal: dict | None = None, fallback: bool = False, summary: str | None = None) -> dict:
+def _result(
+    conn,
+    thread_id: int,
+    *,
+    status: str,
+    message: dict | None = None,
+    proposal: dict | None = None,
+    batch: dict | None = None,
+    fallback: bool = False,
+    summary: str | None = None,
+) -> dict:
     payload = {
         "thread_id": thread_id,
         "status": status,
         "message": message,
         "proposal": proposal,
+        "batch": batch,
         "summary": summary,
         "fallback": fallback,
         **thread_response(conn, thread_id),
@@ -762,7 +1299,9 @@ def learn_turn(
 ) -> dict:
     """Persist one expert turn and advance exactly one atomic confirmation."""
 
-    clean = _clean(content)
+    # Keep the complete raw payload. The HTTP boundary caps a single request,
+    # while bulk segmentation ensures each LLM call stays small.
+    clean = str(content or "").strip()
     if not clean:
         raise ValueError("content must not be empty")
     transaction = conn.transaction() if callable(getattr(conn, "transaction", None)) else nullcontext()
@@ -789,15 +1328,22 @@ def learn_turn(
             "active_grill",
         }
         pending = _pending_proposal(conn, current_thread_id)
+        pending_batch = _pending_batch(conn, current_thread_id)
         pending_status = (
             (pending.get("status") or "pending_confirmation")
             if pending
             else None
         )
-        evidence = _insert_evidence(conn, clean, current_thread_id, channel=channel)
-        reply_kind = classify_reply(clean) if pending else "new"
+        mode = classify_input_mode(
+            clean,
+            pending_question=pending.get("clarification_question") if pending else None,
+            has_pending=bool(pending or pending_batch),
+        )
+        evidence = _insert_evidence(conn, clean, current_thread_id, channel=channel, input_mode=mode)
+        reply_kind = classify_reply(clean) if (pending or pending_batch) else "new"
         message_type = {
             "confirm": "confirmation",
+            "negative": "correction",
             "unknown": "unknown",
             "skip": "skip",
             "correction": "correction",
@@ -806,9 +1352,22 @@ def learn_turn(
             conn, current_thread_id, "user", message_type, clean, int(evidence["id"])
         )
 
+        if mode == "bulk_knowledge_payload":
+            return _learn_bulk_turn(
+                conn,
+                clean=clean,
+                thread_id=current_thread_id,
+                session=session,
+                evidence=evidence,
+                user_message=user_message,
+                llm_service=llm_service,
+                embedding_client=embedding_client,
+                had_pending=bool(pending or pending_batch),
+            )
+
         # A retry after confirmation (or a bare control word in a new thread)
         # is not product knowledge.  Keep the raw input and explain the state.
-        if not pending and classify_reply(clean) in {"confirm", "unknown", "skip"}:
+        if not pending and not pending_batch and classify_reply(clean) in {"confirm", "negative", "unknown", "skip"}:
             response = _insert_message(
                 conn,
                 current_thread_id,
@@ -817,6 +1376,61 @@ def learn_turn(
                 "当前没有待确认的问题；请直接告诉我新的产品信息。",
             )
             return _result(conn, current_thread_id, status="no_pending", message=response)
+
+        batch_selection = (
+            parse_batch_confirmation(clean, int(pending_batch["total_segments"]))
+            if pending_batch else None
+        )
+        if pending_batch and clean.casefold() in {"查看明细", "查看详情", "details"}:
+            detail_message, _ = _batch_detail_message(conn, pending_batch)
+            return _result(
+                conn,
+                current_thread_id,
+                status="awaiting_confirmation",
+                message=detail_message,
+                proposal={"batch_id": pending_batch["id"], "status": "pending_confirmation", "batch": pending_batch},
+                batch=pending_batch,
+            )
+        if pending_batch and (reply_kind == "confirm" or batch_selection is not None):
+            selected = None if reply_kind == "confirm" else batch_selection
+            _confirm_batch(
+                conn,
+                pending_batch,
+                evidence,
+                user_message,
+                segment_numbers=selected,
+                embedding_client=embedding_client,
+            )
+            # A partial confirmation gets a fresh prompt for the remaining
+            # clear facts. This is also a repetition guard for the batch UX.
+            if selected is not None:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE v2_learning_batches SET confirmation_message_id=NULL, updated_at=CURRENT_TIMESTAMP WHERE id=%s",
+                        (pending_batch["id"],),
+                    )
+            batch = _refresh_batch_state(conn, pending_batch)
+            if _batch_is_settled(conn, int(batch["id"])):
+                _resume_paused_proposals(conn, current_thread_id)
+            next_message, _, next_proposal = _next_question(conn, current_thread_id, session)
+            if next_message:
+                return _result(
+                    conn,
+                    current_thread_id,
+                    status=_awaiting_status(next_proposal),
+                    message=next_message,
+                    proposal=next_proposal,
+                    batch=batch,
+                )
+            summary_message, summary_text = _summary(conn, current_thread_id, session)
+            return _result(
+                conn,
+                current_thread_id,
+                status="confirmed",
+                message=summary_message,
+                summary=summary_text,
+                batch=batch,
+            )
 
         if pending and pending_status == "pending_confirmation" and reply_kind == "confirm":
             _confirm(
@@ -844,7 +1458,13 @@ def learn_turn(
                 summary=summary_text,
             )
 
-        if pending and pending_status == "pending_clarification" and reply_kind == "confirm":
+        binary_clarification = (
+            pending
+            and pending_status == "pending_clarification"
+            and (pending.get("expected_answer_type") or _expected_answer_type(pending.get("clarification_question"))) == "binary"
+            and reply_kind in {"confirm", "negative"}
+        )
+        if pending and pending_status == "pending_clarification" and reply_kind == "confirm" and not binary_clarification:
             # Clarification questions are deliberately not yes/no questions.  A
             # bare confirmation is not product evidence and must not supersede
             # the unresolved proposal or be extracted as a new fact.
@@ -880,6 +1500,8 @@ def learn_turn(
             acknowledgement_message = _insert_message(
                 conn, current_thread_id, "assistant", "text", acknowledgement
             )
+            _refresh_batch_state(pending_batch) if pending_batch else None
+            _resume_paused_proposals(conn, current_thread_id)
             next_message, _, next_proposal = _next_question(conn, current_thread_id, session)
             if next_message:
                 return _result(
@@ -948,6 +1570,7 @@ def learn_turn(
             )
             return _result(conn, current_thread_id, status="reused", message=response, fallback=fallback)
 
+        _resume_paused_proposals(conn, current_thread_id)
         question_message, _, active_proposal = _next_question(
             conn, current_thread_id, session
         )

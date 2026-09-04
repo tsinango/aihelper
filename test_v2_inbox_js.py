@@ -146,6 +146,8 @@ const THREAD_SNAPSHOT = {
   ok(localStorage.getItem('inbox-thread-id') === '7', 'current thread persisted across reloads');
   ok(JSON.stringify(quickReplyTexts()) === JSON.stringify(['对', '不对，我来修正', '不知道', '跳过']),
     'confirmation question offers confirm/correct/unknown/skip');
+  ok(JSON.stringify(T.quickReplyLabels('batch_confirmation')) === JSON.stringify(['全部确认明确知识', '查看明细', '我来修正']),
+    'bulk confirmation offers one-click review controls');
   ok(byId['count-week']._text === '+12', 'week count renders with + prefix');
 
   // Successful send: optimistic message, thinking state, POST, explicit GET refresh.

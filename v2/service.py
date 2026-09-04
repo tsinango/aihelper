@@ -136,7 +136,8 @@ def summary(conn) -> dict:
             """
             SELECT count(*) AS count
             FROM v2_learning_proposals
-            WHERE status IN ('pending_clarification', 'pending_confirmation')
+            WHERE paused=FALSE
+              AND status IN ('pending_clarification', 'pending_confirmation')
             """
         )
         pending_count = int(cur.fetchone()["count"])

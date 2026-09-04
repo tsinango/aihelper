@@ -32,6 +32,10 @@ FORBIDDEN_QUESTION_TERMS = frozenset({
     "数据库", "数据表", "字段", "候选知识", "知识库", "知识记录",
     "知识id", "知识键",
     "向量", "嵌入", "重排", "技术实现", "代码实现",
+    # Open-world prompts are not evidence questions. They ask the expert to
+    # complete an unbounded inventory that the source never promised to list.
+    "还有其他", "是否还有", "有没有其他", "还有哪些", "还包括哪些", "完整列表", "数据规模", "知识蒸馏", "蒸馏", "rag",
+    "other models", "other algorithms", "какие еще", "есть ли еще", "полный список", "другие алгоритмы",
 })
 
 PRODUCT_QUESTION_TERMS = frozenset({
@@ -68,6 +72,7 @@ COMPARE_SYSTEM_PROMPT = """
 - 手册或文字没有写某功能，不能推断为“不支持”；只有明确否定证据才是否定事实。
 - 单个型号的事实不能推广到整个系列；新旧版本、hardware revision、firmware、地区和条件都必须保持原范围。
 - 不要询问数据库字段、知识记录、技术实现或审核流程。
+- 不要因为资料没有覆盖某个维度就追问其他模型、数据规模、RAG、蒸馏或“完整列表”；“等”只表示当前列举非穷尽。
 """.strip()
 
 

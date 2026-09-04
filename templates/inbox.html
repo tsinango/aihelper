@@ -271,6 +271,7 @@
     }
 
     function quickReplyLabels(messageType) {
+      if (messageType === 'batch_confirmation') return ['全部确认明确知识', '查看明细', '我来修正'];
       if (messageType === 'clarification') return ['我来回答', '不知道', '跳过'];
       return ['对', '不对，我来修正', '不知道', '跳过'];
     }
@@ -330,7 +331,7 @@
         }
         wrap.append(meta, bubble);
         const messageType = String(value(item, 'message_type', 'type')).toLowerCase();
-        if (index === lastIndex && !user && ['question', 'confirmation', 'clarification'].includes(messageType) && !state.sending) {
+        if (index === lastIndex && !user && ['question', 'confirmation', 'clarification', 'batch_confirmation'].includes(messageType) && !state.sending) {
           renderQuickReplies(wrap, messageType);
         }
         row.append(wrap);
