@@ -20,14 +20,14 @@
     .stats{display:flex;gap:12px;flex-wrap:wrap;min-width:0;color:var(--muted);font-size:12px;flex:1}
     .stats strong{color:var(--text);font-weight:650}
     .top-actions{display:flex;gap:8px;align-items:center;margin-left:auto}
-    .more-nav,.key-settings{color:var(--muted);font-size:12px;position:relative}
-    .more-nav summary,.key-settings summary{cursor:pointer;list-style:none;padding:7px 9px;border:1px solid transparent;border-radius:9px;white-space:nowrap;min-height:40px}
-    .more-nav summary::-webkit-details-marker,.key-settings summary::-webkit-details-marker{display:none}
-    .more-nav summary::after,.key-settings summary::after{content:'⌄';margin-left:4px}
-    .more-nav[open] summary,.key-settings[open] summary{border-color:#cbd5e1;background:#f8fafc}
-    .nav-panel{position:absolute;right:0;top:calc(100% + 6px);z-index:40;display:grid;gap:2px;min-width:150px;padding:8px;background:#fff;border:1px solid var(--line);border-radius:10px;box-shadow:0 8px 22px #1018281a}
-    .nav-panel a{color:var(--text);text-decoration:none;padding:8px 10px;border-radius:7px}
-    .nav-panel a:hover{background:var(--blue-soft);color:var(--blue)}
+    .nav{display:flex;gap:4px;min-width:0;overflow-x:auto}
+    .nav a{color:var(--muted);text-decoration:none;padding:7px 10px;border-radius:7px;white-space:nowrap}
+    .nav a:hover,.nav a.active{background:var(--blue-soft);color:var(--blue)}
+    .key-settings{color:var(--muted);font-size:12px;position:relative}
+    .key-settings summary{cursor:pointer;list-style:none;padding:7px 9px;border:1px solid transparent;border-radius:9px;white-space:nowrap;min-height:40px}
+    .key-settings summary::-webkit-details-marker{display:none}
+    .key-settings summary::after{content:'⌄';margin-left:4px}
+    .key-settings[open] summary{border-color:#cbd5e1;background:#f8fafc}
     .key-panel{position:absolute;right:0;top:calc(100% + 6px);z-index:40;display:grid;grid-template-columns:auto minmax(140px,1fr) auto;align-items:center;gap:8px;width:min(340px,calc(100vw - 20px));padding:10px;background:#fff;border:1px solid var(--line);border-radius:10px;box-shadow:0 8px 22px #1018281a}
     .key-panel input{min-width:0;border:1px solid #cbd5e1;border-radius:8px;padding:8px 9px;font-size:16px}
     .key-panel input:focus{outline:2px solid #bfdbfe;border-color:var(--blue)}
@@ -74,6 +74,15 @@
     .thread-item strong{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:550}
     .thread-item small{display:block;color:var(--muted);margin-top:3px}
     .thread-item time{display:block;color:var(--muted);font-size:11px;margin-top:4px}
+    @media (max-width:759px){
+      .topbar{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:8px 10px;align-items:center}
+      .brand{grid-column:1;grid-row:1}
+      .stats{grid-column:1 / -1;grid-row:2;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:4px;width:100%;font-size:11px;text-align:center}
+      .nav{grid-column:2;grid-row:1}
+      .top-actions{grid-column:3;grid-row:1}
+      .composer textarea{min-height:64px}
+      .composer-note{padding-bottom:max(8px,env(safe-area-inset-bottom))}
+    }
     @media (min-width:760px){
       .bubble{max-width:76%}
       .chat-shell{border-left:1px solid var(--line);border-right:1px solid var(--line)}
@@ -85,18 +94,15 @@
 <body>
   <header class="topbar">
     <a class="brand" href="/inbox">aihelper</a>
+    <nav class="nav" aria-label="主导航"><a class="active" href="/inbox">Inbox</a><a href="/knowledge">Knowledge</a><a href="/documents">Documents</a><a href="/chat">Chat</a></nav>
     <div class="stats" aria-label="知识概况">
       <span>知识库 <strong id="count-knowledge">—</strong></span>
       <span>本周 <strong id="count-week">—</strong></span>
       <span>待确认 <strong id="count-pending">—</strong></span>
       <span>未解缺口 <strong id="count-gaps">—</strong></span>
     </div>
-    <button id="history-toggle" type="button" aria-controls="thread-drawer" aria-expanded="false">历史</button>
     <div class="top-actions">
-      <details class="more-nav" id="more-nav">
-        <summary>页面</summary>
-        <div class="nav-panel"><a href="/knowledge">Knowledge</a><a href="/documents">Documents</a><a href="/chat">Chat</a></div>
-      </details>
+      <button id="history-toggle" type="button" aria-controls="thread-drawer" aria-expanded="false">历史</button>
       <details class="key-settings" id="key-settings">
         <summary>设置 <span id="key-status" class="key-status">未设置</span></summary>
         <div class="key-panel"><label for="api-key">API Key</label><input id="api-key" type="password" autocomplete="off" placeholder="输入后保存"><button id="save-key" type="button">保存</button></div>
