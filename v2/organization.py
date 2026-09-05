@@ -746,14 +746,23 @@ def extract_explicit_chain(knowledge: dict) -> list[dict]:
     subject = str(knowledge.get("entity_name") or "").strip()
     if not subject:
         return []
-    text = "\n".join(str(knowledge.get(key) or "") for key in ("title", "content"))
-    names = _explicit_parent_chain(subject, text)
-    if not names:
-        return []
-    return [
-        {"name": name, "entity_type": _entity_type_for_chain_position(name, index, len(names), text)}
-        for index, name in enumerate(names)
+    evidence_parts = [
+        *(str(knowledge.get(key) or "") for key in ("title", "content")),
+        *_accepted_source_excerpts(knowledge),
     ]
+    # Keep each evidence item separate. Joining independent excerpts can turn
+    # two sentences at a boundary into a fabricated relationship clause.
+    for text in evidence_parts:
+        names = _explicit_parent_chain(subject, text)
+        if names:
+            return [
+                {
+                    "name": name,
+                    "entity_type": _entity_type_for_chain_position(name, index, len(names), text),
+                }
+                for index, name in enumerate(names)
+            ]
+    return []
 
 
 def local_organization_review(
@@ -966,7 +975,12 @@ def _relation_snapshot(relation: dict | None) -> dict | None:
 
 
 def _search_terms_for_context(knowledge: Mapping[str, Any]) -> list[str]:
-    text = " ".join(str(knowledge.get(key) or "") for key in ("entity_name", "title", "content"))
+    text_parts = [
+        str(knowledge.get(key) or "")
+        for key in ("entity_name", "title", "content")
+    ]
+    text_parts.extend(_accepted_source_excerpts(knowledge))
+    text = " ".join(text_parts)
     terms: list[str] = []
     seen: set[str] = set()
 
@@ -982,6 +996,24 @@ def _search_terms_for_context(knowledge: Mapping[str, Any]) -> list[str]:
         if re.search(r"[\u4e00-\u9fff]", token):
             add(token.lstrip("的其是为属于归到和与").rstrip("产品"))
     return terms[:8]
+
+
+def _accepted_source_excerpts(knowledge: Mapping[str, Any]) -> list[str]:
+    """Return only source excerpts explicitly scoped to this Knowledge item.
+
+    The learning layer supplies this field from ``v2_knowledge_sources``. Raw
+    evidence content is intentionally not accepted here: one raw item may
+    support several Knowledge rows with different confirmation states.
+    """
+
+    values = knowledge.get("accepted_source_excerpts")
+    if not isinstance(values, (list, tuple)):
+        return []
+    return [
+        str(value).strip()[:4000]
+        for value in values
+        if str(value or "").strip()
+    ]
 
 
 def _lexical_context_candidates(
@@ -1103,6 +1135,9 @@ def build_local_organization_context(
         for key in ("id", "title", "content", "entity_name", "trust")
         if key in knowledge
     }
+    accepted_source_excerpts = _accepted_source_excerpts(knowledge)
+    if accepted_source_excerpts:
+        current_knowledge["accepted_source_excerpts"] = accepted_source_excerpts
     return {
         "current_knowledge": current_knowledge,
         "current_entity": _entity_snapshot(entity),
@@ -1261,18 +1296,16 @@ def _validate_proposal_against_context(
     action = proposal["action"]
     if action in {"NO_CHANGE", "UNCLEAR"}:
         return dict(proposal), {}, None
-    source_text = "\n".join(
-        str(value or "")
-        for value in (
-            knowledge.get("content"),
-            knowledge.get("source_content"),
-            knowledge.get("source_text"),
-            (context.get("current_knowledge") or {}).get("content"),
+    evidence_scope = [str(knowledge.get("content") or "")]
+    evidence_scope.extend(_accepted_source_excerpts(knowledge))
+    if not any(
+        _contains_evidence(text, proposal["evidence_quote"])
+        for text in evidence_scope
+        if text
+    ):
+        raise OrganizationProposalError(
+            "evidence_quote is not in the confirmed Knowledge content or accepted source excerpt"
         )
-        if value
-    )
-    if not _contains_evidence(source_text, proposal["evidence_quote"]):
-        raise OrganizationProposalError("evidence_quote is not in the confirmed Knowledge content")
     subject = context.get("current_entity") or {}
     if not subject or normalize_entity_name(proposal["subject_entity"]) != normalize_entity_name(subject.get("name")):
         raise OrganizationProposalError("proposal subject is outside the current entity scope")

@@ -437,7 +437,7 @@ def _insert_proposal(
             source_kind="user_input",
             source_role="primary",
             resolution="unresolved",
-            excerpt=fact["content"],
+            excerpt=_clean(fact.get("source_excerpt")) or fact["content"],
         )
     return proposal
 
@@ -575,11 +575,13 @@ def _update_proposal(
 
 
 def _organization_review_context(conn, knowledge: dict) -> dict:
-    """Add immutable source wording needed for explicit local organization.
+    """Add only this Knowledge item's accepted source excerpts.
 
-    The fact row may contain a single atomic paraphrase after extraction while
-    its accepted raw evidence contains the explicit model-to-series sentence.
-    Read that source text for this Knowledge item only; never rewrite the fact.
+    Raw evidence can contain several claims and can be linked to several
+    Knowledge rows.  Its full content therefore cannot be used as evidence for
+    this review.  The Knowledge content and accepted supporting excerpts are
+    the complete evidence scope; unresolved, rejected, contextual, and empty
+    source links stay out of the organization review.
     """
 
     context = dict(knowledge)
@@ -589,20 +591,24 @@ def _organization_review_context(conn, knowledge: dict) -> dict:
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT e.content
+            SELECT s.excerpt
             FROM v2_knowledge_sources s
-            JOIN v2_raw_evidence e ON e.id=s.raw_evidence_id
-            WHERE s.knowledge_id=%s AND s.active=TRUE
+            WHERE s.knowledge_id=%s
+              AND s.active=TRUE
+              AND s.relation='supports'
+              AND s.resolution='accepted'
+              AND char_length(btrim(s.excerpt)) > 0
             ORDER BY s.id
             LIMIT 8
             """,
             (int(knowledge_id),),
         )
-        source_texts = [str(row["content"] or "") for row in cur.fetchall()]
-    if source_texts:
-        context["content"] = "\n".join(
-            [str(knowledge.get("content") or "")] + source_texts
-        )[:24000]
+        source_excerpts = [str(row["excerpt"] or "") for row in cur.fetchall()]
+    if source_excerpts:
+        # Keep Knowledge.content as the atomic fact.  organization.py uses
+        # these explicitly scoped excerpts for its bounded review without
+        # treating the source as a replacement or expansion of the fact.
+        context["accepted_source_excerpts"] = source_excerpts
     return context
 
 
