@@ -127,9 +127,9 @@ class RussianKnowledgeLearningTest(unittest.TestCase):
         facts, fallback = _model_facts(source, llm, normalize_to_russian=True)
 
         self.assertFalse(fallback)
-        self.assertEqual(len(facts), 1)
-        self.assertTrue(_has_russian_prose(facts[0]["content"]))
-        self.assertEqual(facts[0]["source_excerpt"], source)
+        self.assertEqual(len(facts), 2)
+        self.assertTrue(all(_has_russian_prose(fact["content"]) for fact in facts))
+        self.assertTrue(all(fact["source_excerpt"] == source for fact in facts))
         self.assertGreater(len(source), 7000)
         self.assertEqual(len(llm.calls), 1)
 

@@ -55,8 +55,8 @@ _BINARY_QUESTION_MARKERS = (
 )
 
 _CONJOINED_PREDICATE_RE = re.compile(
-    r"^(?P<left>.+?)\s+(?:and|以及|并且|并)\s+"
-    r"(?P<right>(?:supports?|has|have|provides?|uses?|includes?|offers?|features?|is|are|支持|具备|采用|提供|包括).+?)"
+    r"^(?P<left>.+?)\s+(?:and|以及|并且|并|и|а также|также)\s+"
+    r"(?P<right>(?:(?:does\s+not\s+support)|(?:не\s+(?:поддерживает|может|гарантирует))|supports?|has|have|provides?|uses?|includes?|offers?|features?|is|are|支持|具备|采用|提供|包括|поддерживает|поддерживают|имеет|имеют|использует|используют|предоставляет|предоставляют|включает|включают|оснащен|оснащена|содержит|является|являются|обеспечивает|может).+?)"
     r"[.!。！？?]*$",
     re.IGNORECASE,
 )
@@ -64,7 +64,14 @@ _SEMANTIC_STOPWORDS = frozenset({
     "a", "an", "the", "this", "that", "it", "is", "are", "has", "have",
     "and", "or", "to", "of", "for", "with", "while", "can", "may", "will", "at",
     "camera", "cameras", "device", "devices", "model", "产品", "设备", "摄像机",
+    "и", "или", "это", "для", "с", "со", "на", "в", "из", "при", "по", "не",
+    "может", "могут", "поддерживает", "поддерживают", "имеет", "имеют",
+    "камера", "камеры", "устройство", "устройства", "модель", "продукт", "продукты",
 })
+
+_SEMANTIC_TOKEN_RE = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9./()_-]*|[\u0400-\u04ff]+|[\u4e00-\u9fff]"
+)
 
 UNDERSTANDING_SYSTEM_PROMPT = """
 你是一个产品知识学习助理。你正在和产品专家聊天，不是在维护数据库。
@@ -252,6 +259,81 @@ def _source_span(source: str, excerpts: list[str]) -> str:
     return source[min(start for start, _ in positions):max(end for _, end in positions)]
 
 
+def _condition_values(value: Any) -> list[str]:
+    """Normalize condition containers without changing their display text."""
+
+    if isinstance(value, str):
+        values = [value]
+    elif isinstance(value, (list, tuple)):
+        values = list(value)
+    else:
+        values = []
+    return [cleaned for item in values if (cleaned := _clean(item, 2000))]
+
+
+def _condition_keys(value: Any) -> set[str]:
+    return {
+        re.sub(r"\s+", " ", item.casefold()).strip()
+        for item in _condition_values(value)
+    }
+
+
+def _compose_conditions(left: Any, right: Any) -> list[str]:
+    """Union conditions deterministically, preserving first-seen wording."""
+
+    result = []
+    seen = set()
+    for value in [*_condition_values(left), *_condition_values(right)]:
+        key = re.sub(r"\s+", " ", value.casefold()).strip()
+        if key and key not in seen:
+            seen.add(key)
+            result.append(value)
+    return result
+
+
+def _scope_key(value: Any) -> str:
+    return re.sub(r"\s+", " ", _clean(value, 2000).casefold()).strip()
+
+
+def _compose_scope(left: Any, right: Any) -> str:
+    """Keep the explicit scope; equal scopes retain the first spelling."""
+
+    left_value = _clean(left, 2000)
+    return left_value or _clean(right, 2000)
+
+
+def _normalized_fragment(value: Any) -> str:
+    return re.sub(r"\s+", " ", _clean(value, 12000).casefold()).strip()
+
+
+def _compose_fact_content(fact: dict) -> dict:
+    """Materialize scope and conditions in content exactly once.
+
+    Scope/conditions are extracted metadata, but proposal confirmation must
+    show the complete deterministic fact.  The containment check prevents a
+    model that already included either value from receiving a duplicate.
+    """
+
+    result = dict(fact)
+    content = _clean(result.get("content"), 12000)
+    content_key = _normalized_fragment(content)
+    additions = []
+    scope = _clean(result.get("scope"), 2000)
+    if scope and _normalized_fragment(scope) not in content_key:
+        additions.append(scope)
+    conditions = []
+    condition_keys = set()
+    for condition in _condition_values(result.get("conditions")):
+        condition_key = _normalized_fragment(condition)
+        if condition_key and condition_key not in content_key and condition_key not in condition_keys:
+            condition_keys.add(condition_key)
+            conditions.append(condition)
+    additions.extend(conditions)
+    if additions:
+        result["content"] = f"{content.rstrip(' .;')} — {'; '.join(additions)}"
+    return result
+
+
 def _structured_knowledge_units(parsed: dict, source: str) -> list[dict] | None:
     """Parse the semantic extraction contract without inventing provenance."""
 
@@ -343,12 +425,12 @@ def _structured_coverage_matches_claims(parsed: dict) -> bool:
 
 def _meaningful_tokens(value: str, entity_name: str = "") -> set[str]:
     tokens = {
-        token.casefold()
-        for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9./()_-]*|[\u4e00-\u9fff]", value)
+        token.casefold().replace("ё", "е").rstrip(".,;:!?。！？")
+        for token in _SEMANTIC_TOKEN_RE.findall(_clean(value))
     }
     entity_tokens = {
-        token.casefold()
-        for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9./()_-]*|[\u4e00-\u9fff]", entity_name)
+        token.casefold().replace("ё", "е").rstrip(".,;:!?。！？")
+        for token in _SEMANTIC_TOKEN_RE.findall(_clean(entity_name, 500))
     }
     return {token for token in tokens if token not in _SEMANTIC_STOPWORDS and token not in entity_tokens}
 
@@ -369,12 +451,12 @@ def _related_semantic_units(left: dict, right: dict) -> bool:
 
     if not _same_entity(left, right):
         return False
-    left_scope = _clean(left.get("scope"), 2000).casefold()
-    right_scope = _clean(right.get("scope"), 2000).casefold()
+    left_scope = _scope_key(left.get("scope"))
+    right_scope = _scope_key(right.get("scope"))
     if left_scope and right_scope and left_scope != right_scope:
         return False
-    left_conditions = {_clean(value, 2000).casefold() for value in (left.get("conditions") or []) if _clean(value, 2000)}
-    right_conditions = {_clean(value, 2000).casefold() for value in (right.get("conditions") or []) if _clean(value, 2000)}
+    left_conditions = _condition_keys(left.get("conditions"))
+    right_conditions = _condition_keys(right.get("conditions"))
     if left_conditions and right_conditions and left_conditions.isdisjoint(right_conditions):
         return False
     left_tokens = _meaningful_tokens(left.get("content", ""), left.get("entity_name", ""))
@@ -385,30 +467,48 @@ def _related_semantic_units(left: dict, right: dict) -> bool:
         return False
     shared = left_tokens & right_tokens
     smaller = min(len(left_tokens), len(right_tokens))
-    return len(shared) >= 2 and smaller > 0 and len(shared) / smaller >= 0.25
+    if not shared or not smaller:
+        return False
+    # A shared technical marker is a conservative fallback for inflected
+    # Russian paraphrases such as поддерживает / поддерживается. It does not
+    # infer a relation or product fact; it only prevents a clear same-feature
+    # pair from becoming two confirmations because of token morphology.
+    if any(any(character.isdigit() for character in token) for token in shared):
+        return True
+    return len(shared) >= 2 and len(shared) / smaller >= 0.25
 
 
 def _consolidate_related_units(facts: list[dict]) -> list[dict]:
     """Merge adjacent same-entity units only when their wording overlaps."""
 
     if len(facts) < 2:
-        return facts
+        return [_compose_fact_content(fact) for fact in facts]
     result: list[dict] = []
     for fact in facts:
         if result and _related_semantic_units(result[-1], fact):
             previous = result[-1]
-            previous["content"] = f"{previous['content'].rstrip('.。')}。{fact['content'].lstrip()}"
+            left_content = _clean(previous.get("content"), 12000).rstrip()
+            right_content = _clean(fact.get("content"), 12000).lstrip()
+            if re.search(r"[\u3400-\u9fff]", left_content + right_content):
+                separator = "。"
+            else:
+                separator = ". "
+            previous["content"] = (
+                f"{left_content.rstrip('.。!?！？')}"
+                f"{separator}{right_content.lstrip('.。!?！？')}"
+            )
             previous["supporting_claim_ids"] = list(dict.fromkeys(
                 [*previous.get("supporting_claim_ids", []), *fact.get("supporting_claim_ids", [])]
             ))
             previous["supporting_points"] = list(dict.fromkeys(
                 [*previous.get("supporting_points", []), *fact.get("supporting_points", [])]
             ))
-            if not previous.get("scope"):
-                previous["scope"] = fact.get("scope", "")
-            previous["conditions"] = list(dict.fromkeys(
-                [*previous.get("conditions", []), *fact.get("conditions", [])]
-            ))
+            previous["scope"] = _compose_scope(
+                previous.get("scope"), fact.get("scope")
+            )
+            previous["conditions"] = _compose_conditions(
+                previous.get("conditions"), fact.get("conditions")
+            )
             previous_excerpt = previous.get("source_excerpt", "")
             current_excerpt = fact.get("source_excerpt", "")
             if previous_excerpt and current_excerpt:
@@ -418,7 +518,7 @@ def _consolidate_related_units(facts: list[dict]) -> list[dict]:
                 ) or f"{previous_excerpt}\n{current_excerpt}"
             continue
         result.append(dict(fact))
-    return result
+    return [_compose_fact_content(fact) for fact in result]
 
 
 def _split_obvious_conjoined_unit(fact: dict) -> list[dict]:
@@ -434,7 +534,7 @@ def _split_obvious_conjoined_unit(fact: dict) -> list[dict]:
     left = match.group("left").strip()
     right = match.group("right").strip()
     predicate = re.search(
-        r"\b(?:has|have|supports?|provides?|uses?|includes?|offers?|features?|is|are)\b|支持|具备|采用|提供|包括",
+        r"\b(?:has|have|supports?|provides?|uses?|includes?|offers?|features?|is|are|поддерживает|поддерживаются|поддерживается|поддерживают|имеет|имеют|использует|используют|предоставляет|предоставляют|включает|включают|оснащен|оснащена|содержит|является|являются|обеспечивает|может)\b|支持|具备|采用|提供|包括",
         left,
         re.IGNORECASE,
     )
@@ -478,6 +578,8 @@ def _stable_technical_markers(value: str) -> set[str]:
 def _validate_russian_facts(facts: list[dict]) -> None:
     """Reject model output that is not already Russian and lossless enough."""
 
+    source_markers = set()
+    content_markers = set()
     for fact in facts:
         title = _clean(fact.get("title"), 500)
         content = _clean(fact.get("content"), 12000)
@@ -485,10 +587,10 @@ def _validate_russian_facts(facts: list[dict]) -> None:
             raise ValueError("learning extraction did not return Russian Knowledge")
         if language(title) not in {"ru", "und"}:
             raise ValueError("learning extraction did not return a Russian title")
-        if not _stable_technical_markers(content).issuperset(
-            _stable_technical_markers(fact.get("source_excerpt", ""))
-        ):
-            raise ValueError("learning extraction dropped technical markers")
+        content_markers.update(_stable_technical_markers(content))
+        source_markers.update(_stable_technical_markers(fact.get("source_excerpt", "")))
+    if not content_markers.issuperset(source_markers):
+        raise ValueError("learning extraction dropped technical markers")
 
 
 def _extract_learning_response(llm_service, messages: list[dict], max_tokens: int) -> str:
@@ -572,6 +674,10 @@ def _model_facts(
                 "entity_name": _clean(item.get("entity_name") or item.get("entity"), 500),
                 "derived": bool(item.get("derived") or item.get("inferred")),
                 "source_excerpt": _clean(item.get("source_excerpt"), 12000),
+                "scope": _clean(item.get("scope"), 2000),
+                "conditions": _condition_values(
+                    item.get("conditions", item.get("condition"))
+                ),
             })
         if facts:
             if require_coverage and not extraction_coverage_is_complete(
@@ -594,7 +700,11 @@ def _model_facts(
             # Legacy ``facts`` responses already carry the model's intended
             # unit boundaries.  Only repair a single legacy unit; merging an
             # existing multi-fact response would undo its explicit split.
-            facts = _postprocess_semantic_units(facts) if len(facts) == 1 else facts
+            facts = (
+                _postprocess_semantic_units(facts)
+                if len(facts) == 1
+                else [_compose_fact_content(fact) for fact in facts]
+            )
             if normalize_to_russian:
                 _validate_russian_facts(facts)
             return facts, False
@@ -907,7 +1017,7 @@ def _deduplicate_facts(facts: list[dict]) -> list[dict]:
         seen.add(key)
         result.append({
             "title": _clean(fact.get("title"), 500) or content[:120],
-            "content": content,
+            "content": _compose_fact_content(fact)["content"],
             "entity_name": entity_name,
             "derived": bool(fact.get("derived")),
             "individual_confirmation": bool(fact.get("individual_confirmation")),

@@ -80,6 +80,22 @@ class V2UiTest(unittest.TestCase):
         ):
             self.assertIn(contract, content, contract)
 
+    def test_entity_tree_summary_selects_without_blocking_details_toggle(self):
+        content = (ROOT / "templates" / "knowledge.html").read_text()
+        self.assertIn("summary.dataset.entityId=String(node.id)", content)
+        self.assertIn("summary.onclick=()=>{orgSelect(node.id)}", content)
+        self.assertNotIn("summary.onclick=event=>{event.preventDefault();orgSelect(node.id)}", content)
+        self.assertIn("function orgMarkSelected()", content)
+        self.assertIn("orgState.selected=entityId;orgMarkSelected()", content)
+        self.assertNotIn("orgState.selected=entityId;orgTree(orgState.tree)", content)
+
+    def test_empty_branch_confirmation_counts_descendants_not_self(self):
+        content = (ROOT / "templates" / "knowledge.html").read_text()
+        self.assertIn("function orgDescendantCount(node)", content)
+        self.assertIn("Math.max(0,total-1)", content)
+        self.assertIn("const descendantCount=orgDescendantCount(node)", content)
+        self.assertIn("其下还有 ${descendantCount} 个空节点", content)
+
     def test_inbox_chat_reliability_contract(self):
         content = (ROOT / "templates" / "inbox.html").read_text()
         self.assertIn("cache: CACHE_MODE", content)
