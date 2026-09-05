@@ -4,8 +4,11 @@
 
 ## 当前实现状态（2026-09-05）
 
-本计划中的 Phase 1、Phase 2 和 Phase 2.2 已在当前 `main` 完成基础实现。当前
-生产闭环是：
+本计划中的 Phase 1、Phase 2 和 Phase 2.2 已在当前 `main` 完成，Phase 2.2 已
+正式收口，当前处于 **Phase 3.0**（Organization 收口 + UX Gate + 评测基线，
+详见 [astra.md](astra.md)）。后续阶段（Phase 3.1 Read-only Internal QA、
+3.2 纠正与复测、Phase 4/5）按 `astra.md` 执行；本文不再包含“禁止进入 Phase 3”
+的限制。V2 Answer Service 尚未实现。当前生产闭环是：
 
 ```text
 Raw Evidence
@@ -14,7 +17,7 @@ Raw Evidence
   → Pending Knowledge
   → 用户确认
   → Knowledge + provenance
-  → local Entity organization review
+  → 确定性精确 Entity 关联（自动 LLM organization 已默认关闭）
 ```
 
 已完成的 V2 能力包括：
@@ -25,13 +28,22 @@ Raw Evidence
   `/ready` 和 worker heartbeat 检查。
 - Learning 使用 `openai/gpt-oss-20b:free` Structured Outputs。正常路径一次调用，
   contract 失败最多一次 repair；失败时只保留 Raw Evidence，不做原文 fallback。
+- **Phase 3.0 组织层收口**：确认 Knowledge 后不再自动调用 LLM 做结构整理
+  （内部开关 `V2_ORGANIZATION_LLM_ENABLED` 默认关闭，仅用于回退验证）。
+  精确 Entity 关联、Entity/Relation 数据、provenance、防环和人工 tree/move/prune
+  API 全部保留；不删除表、不迁移 relation、不新增 relation 类型。
+- **技术失败与业务歧义分离**：compare judge 的 provider/解析/contract 失败标记
+  `technical_failure`，Inbox job 失败可重试，不再伪装成产品澄清问题。
+- **评测基线**：`evaluate_v2.py` + `data/v2_eval_cases.json` sidecar 建立固定
+  30 条评测输入规范与完整性检查；Phase 3.0 不伪造 V2 答案基线，第一次真实
+  QA baseline 在 Phase 3.1 产生。
 - Knowledge 页面支持搜索、编辑、软删除、恢复、Entity 移动、来源和简单历史。
   人工编辑不调用 LLM，内容变化会使 embedding 失效。
 - Entity Tree 保持局部、轻量和可审计。只有完全没有 active/deleted Knowledge 引用
   的结构才允许用户手动软删除；不做全局重排或自动 prune。
 
 本文件后续的历史 inventory 和阶段说明仍用于解释迁移背景；若与本节冲突，以本节
-和 `README.md`、`OPERATIONS.md` 中的当前状态为准。
+和 `README.md`、`OPERATIONS.md`、`astra.md` 中的当前状态为准。
 
 ## 目标和边界
 
@@ -217,7 +229,8 @@ v2_knowledge_history
 4. Knowledge 页面提供直接编辑、软删除、恢复、Entity 移动、来源和历史；内容编辑会清空旧 embedding，Raw Evidence 保持不可变。
 5. Entity 结构只允许用户手动 prune 完全为空的 active subtree。active 或 deleted Knowledge 引用、非空子树和无法安全判断的情况都会拒绝操作。
 
-Phase 2.2 之后保持在 UX Gate。Phase 3 Grounded QA、gap loop 和 Telegram V2 接入必须等人工验证结果。
+Phase 2.2 已收口并进入 Phase 3.0。后续阶段按 `astra.md` 的顺序执行：
+Phase 3.1 Read-only Internal QA → 3.2 纠正与复测 → Phase 4 → Phase 5。
 
 ## 提交和发布纪律
 
@@ -225,4 +238,5 @@ Phase 2.2 之后保持在 UX Gate。Phase 3 Grounded QA、gap loop 和 Telegram 
 - Phase 1：skeleton 代码、migration、页面和测试单独 commit 并 push。
 - Phase 2：学习闭环代码、trust 测试和测试报告单独 commit 并 push。
 - 每个 commit 前运行 `.venv/bin/python -m unittest discover -p 'test_*.py'`，检查 `git diff --check` 和 `git status`；不提交 ignored secrets、data export 或临时文件。
-- Phase 2.2 完成后停止在 UX Gate；Phase 3 Grounded QA、gap loop 和 Telegram V2 接入必须等人工验证结果。
+- Phase 2.2 已收口；Phase 3.0（组织层收口 + UX Gate + 评测基线）已实施，后续按
+  `astra.md` 进入 Phase 3.1，不再停留在“禁止 Phase 3”的状态。

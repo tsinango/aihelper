@@ -30,6 +30,16 @@ INBOX_WORKER_HEALTHY_THRESHOLD_SECONDS = max(
     float(os.getenv("INBOX_WORKER_HEALTHY_THRESHOLD_SECONDS", "45")),
 )
 
+# Phase 3.0 organization closure: confirmed Knowledge is no longer sent to the
+# LLM for automatic relation/structure review.  Deterministic exact Entity
+# linking still runs on every confirmation.  This switch exists only as an
+# internal deployment/rollback lever for verifying the old behavior; it is not
+# a product setting and defaults to off.
+V2_ORGANIZATION_LLM_ENABLED = (
+    os.getenv("V2_ORGANIZATION_LLM_ENABLED", "").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+
 
 def _dict(row: Any) -> dict:
     return dict(row) if row is not None else {}

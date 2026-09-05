@@ -19,7 +19,7 @@ The codebase is in transition between two generations:
   `/review/published`) where reviewers approve Telegram-derived support-case
   knowledge into published `verified_knowledge`. Only published knowledge may
   answer customers; historical case memory is recall/reviewer evidence only.
-- **V2** (Phases 1–2.2 implemented; Phase 3 is not exposed): a new Inbox-first
+- **V2** (Phases 1–2.2 implemented and closed; currently Phase 3.0): a new Inbox-first
   learning loop under `v2/` with its own `v2_`-prefixed tables, pages
   (`/inbox`, `/knowledge`, `/documents`, `/chat`) and `/api/v2/*` routes.
   Knowledge carries one of four trust values (`official_source`,
@@ -177,5 +177,9 @@ explain behavior and data/schema impact, list test commands run, and include
 screenshots for `/review` or V2 page UI changes; call out required
 environment variables, migrations, deployment steps, and rollback
 considerations. V2 work follows the phase discipline in
-`V2_REFACTOR_PLAN.md`: keep V1 routes and tests passing, keep migrations
-additive, and stop at the Phase 2.2 UX gate without starting Phase 3.
+`V2_REFACTOR_PLAN.md` and `astra.md`: keep V1 routes and tests passing, keep
+migrations additive. Phase 2.2 is closed; Phase 3.0 (organization closure +
+UX gate + evaluation baseline) is implemented — automatic LLM organization
+after confirmation is off by default (`V2_ORGANIZATION_LLM_ENABLED`), and
+the next step is Phase 3.1 Read-only Internal QA (`astra.md`). The V2 Answer
+Service does not exist yet.

@@ -504,5 +504,188 @@ class LearningLoopTest(unittest.TestCase):
         retire.assert_not_called()
 
 
+class OrganizationClosureTest(unittest.TestCase):
+    """Phase 3.0: confirmation no longer triggers automatic LLM organization.
+
+    Deterministic exact-Entity linking must keep working with the LLM review
+    disabled, and the deployment switch must be the only way to re-enable it.
+    """
+
+    def _knowledge_conn(self):
+        return FakeConnection([{
+            "id": 20,
+            "title": "高度",
+            "content": "F-NR-208E/2 是 1U",
+            "entity_name": "F-NR-208E/2",
+            "trust": "user_confirmed",
+            "active": True,
+        }, {
+            "id": 30,
+            "thread_id": 7,
+            "source_message_id": 11,
+            "question_message_id": 12,
+            "fact_text": "高度",
+            "entity_name": "F-NR-208E/2",
+            "proposed_trust": "provisional",
+            "status": "confirmed",
+            "confirmed_knowledge_id": 20,
+            "resolution_message_id": 12,
+        }])
+
+    def test_confirmation_does_not_call_llm_organization_by_default(self):
+        conn = self._knowledge_conn()
+        llm = object()
+        with patch("v2.organization.review_local_organization", return_value={
+            "action": "NO_CHANGE", "entity": None, "relations": [], "reason": "",
+        }) as review, patch("v2.learning._update_proposal"):
+            _confirm(
+                conn,
+                {"id": 30, "confirmed_knowledge_id": 20},
+                {"id": 11, "content": "对"},
+                {"id": 12, "content": "对"},
+                llm_service=llm,
+            )
+        review.assert_called_once()
+        self.assertIsNone(review.call_args.kwargs["llm_service"])
+
+    def test_confirmation_runs_deterministic_linking_without_llm(self):
+        conn = self._knowledge_conn()
+        with patch("v2.organization.review_local_organization", return_value={
+            "action": "NO_CHANGE", "entity": {"id": 5, "name": "F-NR-208E/2"},
+            "relations": [], "reason": "",
+        }) as review, patch("v2.learning._update_proposal"):
+            _confirm(
+                conn,
+                {"id": 30, "confirmed_knowledge_id": 20},
+                {"id": 11, "content": "对"},
+                {"id": 12, "content": "对"},
+                llm_service=object(),
+            )
+        self.assertEqual(review.call_args.args[1]["entity_name"], "F-NR-208E/2")
+
+    def test_internal_switch_reenables_llm_organization(self):
+        conn = self._knowledge_conn()
+        llm = object()
+        with patch("v2.learning._v2_service.V2_ORGANIZATION_LLM_ENABLED", True), patch(
+            "v2.organization.review_local_organization", return_value={
+                "action": "NO_CHANGE", "entity": None, "relations": [], "reason": "",
+            }
+        ) as review, patch("v2.learning._update_proposal"):
+            _confirm(
+                conn,
+                {"id": 30, "confirmed_knowledge_id": 20},
+                {"id": 11, "content": "对"},
+                {"id": 12, "content": "对"},
+                llm_service=llm,
+            )
+        self.assertIs(review.call_args.kwargs["llm_service"], llm)
+
+    def test_embedding_failure_does_not_break_confirmation(self):
+        class BrokenEmbedder:
+            def encode(self, texts, normalize_embeddings=True):
+                raise RuntimeError("embedding provider unavailable")
+
+        conn = self._knowledge_conn()
+        with patch("v2.organization.review_local_organization", return_value={
+            "action": "NO_CHANGE", "entity": None, "relations": [], "reason": "",
+        }), patch("v2.learning._update_proposal"):
+            knowledge = _confirm(
+                conn,
+                {"id": 30, "confirmed_knowledge_id": 20},
+                {"id": 11, "content": "对"},
+                {"id": 12, "content": "对"},
+                embedding_client=BrokenEmbedder(),
+                llm_service=object(),
+            )
+        self.assertEqual(knowledge["trust"], "user_confirmed")
+        self.assertTrue(any("SET trust=CASE" in query for query, _ in conn.executed))
+
+
+class TechnicalFailureNotAmbiguityTest(unittest.TestCase):
+    """Phase 3.0: a compare service failure must fail the processing job so it
+    stays retryable, never become a business clarification question."""
+
+    def test_plan_fact_raises_on_technical_failure(self):
+        from v2.compare import CompareServiceError
+
+        comparison = {
+            "decision": "UNCLEAR",
+            "knowledge_id": None,
+            "question": "请明确「F-NR-208E/2」这条信息具体适用于哪个型号、版本或条件？",
+            "reason": "比较服务不可用或返回无法解析的结果",
+            "technical_failure": True,
+        }
+        with patch("v2.learning.retrieve_learning_knowledge", return_value=[{
+            "id": 17, "title": "高度", "content": "F-NR-208E/2 高度 1U",
+            "entity_name": "F-NR-208E/2", "trust": "official_source",
+        }]), patch("v2.learning.compare_and_ask", return_value=comparison), patch(
+            "v2.learning._insert_proposal"
+        ) as insert:
+            with self.assertRaises(CompareServiceError):
+                _plan_fact(
+                    object(),
+                    thread_id=7,
+                    message_id=11,
+                    evidence_id=10,
+                    fact={"title": "高度", "content": "F-NR-208E/2 是 1U", "entity_name": "F-NR-208E/2"},
+                    llm_service=object(),
+                    embedding_client=None,
+                )
+        insert.assert_not_called()
+
+    def test_learn_turn_propagates_technical_failure(self):
+        from v2.compare import CompareServiceError
+
+        common_patches = [
+            patch("v2.learning.create_thread", return_value={"id": 7, "channel": "web", "mode": "learn"}),
+            patch("v2.learning.get_thread", return_value={"id": 7, "channel": "web", "mode": "learn"}),
+            patch("v2.learning._ensure_session", return_value={"id": 9, "question_budget": 5}),
+            patch("v2.learning._pending_proposal", return_value=None),
+            patch("v2.learning._pending_context", return_value=[]),
+            patch("v2.learning._lock_thread"),
+            patch("v2.learning._insert_evidence", return_value={"id": 10, "content": "input"}),
+            patch("v2.learning._insert_message", return_value={"id": 11, "thread_id": 7, "content": "msg"}),
+        ]
+        started = [p.start() for p in common_patches]
+        self.addCleanup(lambda: [p.stop() for p in common_patches])
+        comparison = {
+            "decision": "UNCLEAR",
+            "knowledge_id": None,
+            "question": " fabricated question",
+            "reason": "比较服务不可用",
+            "technical_failure": True,
+        }
+        with patch("v2.learning._model_facts", return_value=([
+            {"title": "高度", "content": "F-NR-208E/2 是 1U", "entity_name": "F-NR-208E/2"},
+        ], False)), patch("v2.learning.retrieve_learning_knowledge", return_value=[{
+            "id": 17, "title": "高度", "content": "F-NR-208E/2 高度 1U",
+            "entity_name": "F-NR-208E/2", "trust": "official_source",
+        }]), patch("v2.learning.compare_and_ask", return_value=comparison):
+            with self.assertRaises(CompareServiceError):
+                learn_turn(object(), "F-NR-208E/2 是 1U", llm_service=object())
+
+
+class DuplicateConfirmationGuardTest(unittest.TestCase):
+    def test_second_confirm_without_pending_is_not_double_saved(self):
+        patches = [
+            patch("v2.learning.create_thread", return_value={"id": 7, "channel": "web", "mode": "learn"}),
+            patch("v2.learning.get_thread", return_value={"id": 7, "channel": "web", "mode": "learn"}),
+            patch("v2.learning._ensure_session", return_value={"id": 9, "question_budget": 5}),
+            patch("v2.learning._pending_proposal", return_value=None),
+            patch("v2.learning._pending_context", return_value=[]),
+            patch("v2.learning._lock_thread"),
+            patch("v2.learning._insert_evidence", return_value={"id": 10, "content": "对"}),
+            patch("v2.learning._insert_message", return_value={"id": 11, "thread_id": 7, "content": "对"}),
+            patch("v2.learning.thread_response", return_value={"thread": {"id": 7}, "messages": []}),
+            patch("v2.learning._confirm"),
+        ]
+        started = [p.start() for p in patches]
+        confirm_mock = started[-1]
+        self.addCleanup(lambda: [p.stop() for p in patches])
+        result = learn_turn(object(), "对")
+        self.assertEqual(result["status"], "no_pending")
+        confirm_mock.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

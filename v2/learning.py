@@ -24,9 +24,10 @@ from v2.bulk import (
     requires_individual_confirmation,
     segment_bulk_text,
 )
-from v2.compare import compare_and_ask, safe_question
+from v2.compare import CompareServiceError, compare_and_ask, safe_question
 from v2.retrieval import retrieve_learning_knowledge, store_knowledge_embedding
 from v2.service import create_thread, get_thread, json_safe, thread_response
+from v2 import service as _v2_service
 from psycopg.types.json import Jsonb
 
 
@@ -1236,7 +1237,11 @@ def _organization_review_context(conn, knowledge: dict) -> dict:
 def _run_local_organization_review(conn, knowledge: dict, *, llm_service=None) -> dict:
     """Best-effort organization after a fact is durably confirmed.
 
-    Organization is deliberately isolated behind a savepoint.  A malformed
+    Phase 3.0 closure: the LLM structure review is off by default
+    (``V2_ORGANIZATION_LLM_ENABLED``), so confirmation only performs the
+    deterministic exact-Entity linking that ``organization.py`` provides
+    without a model.  The switch is an internal rollback lever, not a product
+    setting.  Organization stays isolated behind a savepoint: a malformed
     relation, missing additive schema, or any other organization failure must
     not turn a successful Knowledge confirmation into a failed learning turn.
     """
@@ -1247,10 +1252,15 @@ def _run_local_organization_review(conn, knowledge: dict, *, llm_service=None) -
         transaction = conn.transaction() if callable(getattr(conn, "transaction", None)) else nullcontext()
         with transaction:
             context = _organization_review_context(conn, knowledge)
+            review_llm = (
+                llm_service
+                if _v2_service.V2_ORGANIZATION_LLM_ENABLED
+                else None
+            )
             return review_local_organization(
                 conn,
                 context,
-                llm_service=llm_service,
+                llm_service=review_llm,
             )
     except Exception:
         log.exception(
@@ -1423,6 +1433,13 @@ def _plan_fact(
         same_model_only=True,
     )
     comparison = compare_and_ask(fact, candidates, llm_service)
+    if comparison.get("technical_failure"):
+        # A provider/parsing failure is not product ambiguity.  Fail the
+        # processing job so it stays retryable instead of manufacturing a
+        # business clarification question for the expert.
+        raise CompareServiceError(
+            comparison.get("reason") or "comparison service unavailable"
+        )
     decision = comparison["decision"]
     related_ids = (
         [int(comparison["knowledge_id"])]

@@ -124,5 +124,88 @@ class LocalQwenEvaluationTest(unittest.TestCase):
         self.assertTrue(insufficient["must_clarify"] or insufficient["must_refuse"])
 
 
+class EvaluateV2ReadinessTest(unittest.TestCase):
+    """Phase 3.0: the evaluation runner must validate golden and sidecar
+    integrity without touching the network or a database."""
+
+    def _golden(self, samples):
+        return {
+            "version": "golden-v2",
+            "labeling": {
+                "required_fields": [
+                    "expected_answer_status",
+                    "expected_scope",
+                    "expected_knowledge_keys",
+                    "evidence_case_ids",
+                    "must_clarify",
+                    "must_refuse",
+                ],
+            },
+            "samples": samples,
+        }
+
+    def _sample(self, key, status="answered", tags=("direct_answer",)):
+        return {
+            "sample_key": key,
+            "question": f"问题 {key}？",
+            "expected_answer_status": status,
+            "expected_scope": {},
+            "expected_knowledge_keys": [],
+            "evidence_case_ids": [1],
+            "must_clarify": status == "needs_clarification",
+            "must_refuse": status == "unsupported",
+            "tags": list(tags),
+        }
+
+    def _sidecar(self, cases):
+        return {"version": "v2-eval-cases-1", "cases": cases}
+
+    def _case(self, key, category, status="answered"):
+        return {
+            "sample_key": key,
+            "category": category,
+            "expected_answer_status": status,
+            "v2_knowledge_ids": [],
+            "mapping_status": "pending_expert_mapping",
+            "paraphrases": [],
+            "forbidden_assertions": [],
+        }
+
+    def test_valid_pair_passes_with_quota(self):
+        from evaluate_v2 import check_golden_set, check_sidecar
+
+        statuses = ["answered"] * 15 + ["needs_clarification"] * 5 + ["unsupported"] * 5
+        samples = [self._sample(f"k-{i:02d}", status=s) for i, s in enumerate(statuses)]
+        for i in range(5):
+            samples.append(self._sample(f"b-{i}", tags=("condition_restriction",)))
+        errors, warnings = [], []
+        by_key = check_golden_set(self._golden(samples), errors, warnings)
+        cases = [self._case(f"k-{i:02d}", "answerable") for i in range(15)]
+        cases += [self._case(f"k-{15 + i}", "clarify", "needs_clarification") for i in range(5)]
+        cases += [self._case(f"k-{20 + i}", "unsupported", "unsupported") for i in range(5)]
+        cases += [self._case(f"b-{i}", "boundary") for i in range(5)]
+        check_sidecar(self._sidecar(cases), by_key, errors, warnings)
+        self.assertEqual(errors, [])
+
+    def test_missing_quota_and_status_mismatch_are_errors(self):
+        from evaluate_v2 import check_golden_set, check_sidecar
+
+        samples = [self._sample("only-one")]
+        errors, warnings = [], []
+        by_key = check_golden_set(self._golden(samples), errors, warnings)
+        cases = [self._case("only-one", "clarify", "answered")]
+        check_sidecar(self._sidecar(cases), by_key, errors, warnings)
+        self.assertTrue(any("quota not met" in error for error in errors))
+        self.assertTrue(any("clarify but labelled" in error for error in errors))
+
+    def test_unknown_sample_key_is_an_error(self):
+        from evaluate_v2 import check_golden_set, check_sidecar
+
+        errors, warnings = [], []
+        by_key = check_golden_set(self._golden([self._sample("real")]), errors, warnings)
+        check_sidecar(self._sidecar([self._case("ghost", "answerable")]), by_key, errors, warnings)
+        self.assertTrue(any("unknown golden sample_key" in error for error in errors))
+
+
 if __name__ == "__main__":
     unittest.main()

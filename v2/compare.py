@@ -17,6 +17,16 @@ from llm import LLMService, parse_json_response
 
 log = logging.getLogger("aihelper.v2.compare")
 
+
+class CompareServiceError(RuntimeError):
+    """The comparison judge is unavailable or returned unusable output.
+
+    This is a technical failure, not product ambiguity.  Callers must surface
+    it as a retryable processing failure instead of asking the expert a
+    business clarification question.
+    """
+
+
 DECISIONS = frozenset({"NEW", "CONFIRM", "ENRICH", "CONFLICT", "UNCLEAR"})
 QUESTION_DECISIONS = frozenset({"CONFLICT", "UNCLEAR"})
 REQUIRED_CANDIDATE_DECISIONS = frozenset({"CONFIRM", "ENRICH", "CONFLICT"})
@@ -232,11 +242,16 @@ def _question_is_safe(question: Any) -> bool:
 
 
 def _fail_closed(fact: dict[str, str], reason: str = "无法安全解析比较结果") -> dict[str, Any]:
+    # technical_failure marks a provider/parse/contract failure.  It must not
+    # be presented to the expert as product uncertainty; the caller turns it
+    # into a retryable job failure.  A genuine semantic UNCLEAR decision from
+    # the judge carries no such marker.
     return {
         "decision": "UNCLEAR",
         "knowledge_id": None,
         "question": safe_question(fact, "UNCLEAR"),
         "reason": _text(reason, 500) or "无法安全解析比较结果",
+        "technical_failure": True,
     }
 
 
@@ -306,8 +321,11 @@ def compare_and_ask(
     confirmation intact.  Callers should invoke this once per extracted fact.
 
     Malformed model output, an unavailable judge, and every unsafe model
-    decision return ``UNCLEAR`` with a safe product question.  Input shape
-    errors are programmer errors and raise ``ValueError`` before an LLM call.
+    decision return ``UNCLEAR`` with a safe product question.  Provider,
+    parsing, and contract failures additionally carry
+    ``technical_failure=True`` so callers can distinguish a retryable service
+    failure from genuine product ambiguity.  Input shape errors are programmer
+    errors and raise ``ValueError`` before an LLM call.
     """
 
     normalized_facts = _normalise_facts(facts)
@@ -361,6 +379,7 @@ def compare_and_ask(
 __all__ = [
     "ALLOWED_RESULT_KEYS",
     "COMPARE_SYSTEM_PROMPT",
+    "CompareServiceError",
     "DECISIONS",
     "compare_and_ask",
     "intrinsic_clarification_question",

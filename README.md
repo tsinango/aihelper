@@ -22,7 +22,8 @@ INBOX_WORKER_HEALTHY_THRESHOLD_SECONDS=45
 
 ## V2 当前状态（截至 2026-09-05）
 
-V2 已完成 Phase 2.2 的生产闭环，当前入口是 Inbox-first 的产品知识学习：
+V2 已完成 Phase 2.2 的生产闭环并正式收口，当前处于 **Phase 3.0**（收口 + 评测基线），
+下一阶段是 Phase 3.1 Read-only Internal QA。V2 Answer Service 尚未实现。
 
 ```text
 Raw Evidence
@@ -31,7 +32,19 @@ Raw Evidence
   → Pending Knowledge
   → 用户确认
   → 可追溯 Knowledge
+  → 确定性精确 Entity 关联（默认不再调用 LLM 做结构整理）
 ```
+
+**Phase 3.0 组织层收口**：确认 Knowledge 后默认只执行确定性的精确 Entity 关联
+（`organization.py` 中不依赖 LLM 的 baseline），不再自动调用 LLM 整理 relation
+或实体结构。已有 Entity / Relation 数据、provenance、防环校验和人工
+tree/move/prune API 全部保留；未删除任何表或历史数据，未新增 relation 类型。
+内部部署开关 `V2_ORGANIZATION_LLM_ENABLED`（默认关闭）仅用于回退验证，不是产品
+设置。
+
+**技术失败 ≠ 业务歧义**：compare judge 的 provider/解析/contract 失败现在标记
+`technical_failure`，Inbox job 会失败并可重试，不会再伪装成产品澄清问题生成
+无价值的提问。真正的语义不确定仍走澄清流程。
 
 Learning extraction 默认使用免费的
 `openai/gpt-oss-20b:free`（可通过 `V2_LEARNING_MODEL` 配置，但必须保持
@@ -69,6 +82,27 @@ Knowledge Graph editor 和 Telegram V2 接入不会进入当前 V2 主导航或�
 - `/documents`：查看现有文档资产；文档学习管道仍未作为 V2 Learning 主入口。
 
 直接路由 `/chat` 保留作兼容页面，但 Grounded QA 尚未作为当前 V2 产品能力开放。
+
+## V2 评测基线（Phase 3.0）
+
+从 Phase 3.0 起评测是上线门槛。`data/golden_set.json`（135 条）保持不可变；
+V2 特有的映射、人工预期、改写问法和禁止断言保存在 sidecar
+`data/v2_eval_cases.json`（固定 30 条：15 可回答 / 5 必须澄清 / 5 无依据 /
+5 型号/条件边界），不覆盖原 golden 文件。当前 sidecar 的 V2 Knowledge 映射、
+改写问法仍 `pending_expert_mapping`，由领域专家在 Phase 3.1 前补齐，缺口由
+runner 如实报告，不伪造。
+
+```bash
+# 无网络/无模型：完整性与固定选样检查，写 data/v2_eval_report.json
+.venv/bin/python evaluate_v2.py
+
+# 有数据库时追加 V2 Knowledge 资格与词法检索基线
+.venv/bin/python evaluate_v2.py --database-url postgresql://...
+```
+
+`evaluate_v2.py` 只做完整性检查、sidecar 校验和（可选的）retrieval/trust 基线；
+Phase 3.0 没有 V2 Answer Service，不生成、不伪造任何 V2 答案准确率。第一次
+真实端到端 QA baseline 在 Phase 3.1 实现 answer service 后产生。
 
 ## 测试
 

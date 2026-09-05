@@ -174,7 +174,37 @@ V2_LEARNING_MODEL=openai/gpt-oss-20b:free
 INBOX_WORKER_NAME=aihelper-inbox-worker
 INBOX_WORKER_HEARTBEAT_INTERVAL_SECONDS=10
 INBOX_WORKER_HEALTHY_THRESHOLD_SECONDS=45
+# Phase 3.0 internal rollback lever only; automatic LLM organization after
+# Knowledge confirmation stays off in production. Do not set to true unless
+# verifying the pre-3.0 behavior.
+# V2_ORGANIZATION_LLM_ENABLED=false
 ```
+
+## V2 评测基线（Phase 3.0 起为上线门槛）
+
+`data/golden_set.json`（135 条）不可变；V2 评测输入规范与固定选样保存在 sidecar
+`data/v2_eval_cases.json`（30 条：15 可回答 / 5 必须澄清 / 5 无依据 / 5
+型号/条件边界），只补充 V2 映射、人工预期、改写问法和禁止断言，不覆盖 golden。
+当前映射状态为 `pending_expert_mapping`，由领域专家在 Phase 3.1 前补齐。
+
+无网络、无模型、无数据库即可运行的完整性与选样检查（退出码非零表示失败）：
+
+```bash
+.venv/bin/python evaluate_v2.py
+```
+
+有数据库时追加 V2 Knowledge 资格（trust、accepted supports 来源）与词法检索
+召回基线：
+
+```bash
+.venv/bin/python evaluate_v2.py \
+  --database-url postgresql://... \
+  --report data/v2_eval_report.json
+```
+
+Phase 3.0 尚无 V2 Answer Service：runner 不生成、不伪造 V2 答案准确率，
+`golden_reference` 不会被当作模型答案。第一次真实端到端 QA baseline 在
+Phase 3.1 实现 answer service 后产生，成为后续版本的比较基准。
 
 ## 本机 Qwen 离线评测
 

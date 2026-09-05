@@ -165,5 +165,48 @@ class CompareAndAskTest(unittest.TestCase):
         self.assertIsNone(result["knowledge_id"])
 
 
+class TechnicalFailureBoundaryTest(unittest.TestCase):
+    """Phase 3.0: provider/parsing failures must be distinguishable from
+    genuine product ambiguity so the learning loop never manufactures a
+    business clarification question out of a service outage."""
+
+    def test_judge_exception_marks_technical_failure(self):
+        class BrokenJudge:
+            def judge(self, messages, max_tokens=1000):
+                raise RuntimeError("OpenRouter unavailable")
+
+        result = compare_and_ask(FACT, [CANDIDATE], BrokenJudge())
+        self.assertTrue(result.get("technical_failure"))
+        self.assertEqual(result["decision"], "UNCLEAR")
+
+    def test_parse_failure_marks_technical_failure(self):
+        judge = FakeJudge("not json at all")
+        result = compare_and_ask(FACT, [CANDIDATE], judge)
+        self.assertTrue(result.get("technical_failure"))
+
+    def test_contract_violation_marks_technical_failure(self):
+        judge = FakeJudge('{"decision":"CONFIRM","knowledge_id":999,"question":null,"reason":"x"}')
+        result = compare_and_ask(FACT, [CANDIDATE], judge)
+        self.assertTrue(result.get("technical_failure"))
+
+    def test_valid_unclear_decision_is_business_ambiguity(self):
+        judge = FakeJudge(
+            '{"decision":"UNCLEAR","knowledge_id":null,'
+            '"question":"这条信息具体适用于哪个固件版本？","reason":"版本不明"}'
+        )
+        result = compare_and_ask(FACT, [CANDIDATE], judge)
+        self.assertEqual(result["decision"], "UNCLEAR")
+        self.assertNotIn("technical_failure", result)
+
+    def test_valid_conflict_decision_is_business_ambiguity(self):
+        judge = FakeJudge(
+            '{"decision":"CONFLICT","knowledge_id":17,'
+            '"question":"这两条产品结论哪一条准确？","reason":"矛盾"}'
+        )
+        result = compare_and_ask(FACT, [CANDIDATE], judge)
+        self.assertEqual(result["decision"], "CONFLICT")
+        self.assertNotIn("technical_failure", result)
+
+
 if __name__ == "__main__":
     unittest.main()
