@@ -8,11 +8,13 @@ recap.  This module is intentionally independent from the V1 review code.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from contextlib import nullcontext
 from typing import Any
 
+from helpers import language
 from llm import parse_json_response
 
 from v2.bulk import (
@@ -96,6 +98,7 @@ UNDERSTANDING_SYSTEM_PROMPT = """
 - 不要因为 subject 相同或句子中出现“and/以及”就合并独立属性。例如“The camera has 8 MP resolution and supports PoE.”必须输出两个 knowledge_units，分别保留分辨率和供电方式；一个句子不等于一个 unit。
 - 反例与正例： “The camera has 8 MP resolution and supports PoE.” → 两个 units；“The camera keeps the overall scene visible while zooming. This reduces blind spots.” → 一个 unit，后一句作为同一能力的直接效果。请优先遵循这个区别。
 - canonical_fact 不要逐字复制整段输入，也不要把“本段没有说明某参数”这类元评论写成产品事实。只保留可引用的产品结论，通常比原文更短；但不能为变短而丢失技术意义、条件或否定边界。
+- title 和 canonical_fact 必须用俄语书写，无论原文是中文、英文还是其他语言。产品名、型号、SKU、协议名、标准名和常见技术缩写（例如 TandemVu、H.265、PoE、ONVIF、PTZ）保持原样，不要翻译成臆造的名称。entity_name 用于精确匹配，可以保留规范产品名或型号。
 - 营销性结论（例如“提升安全性”“优秀用户体验”）如果没有独立可验证的产品事实，可作为 claim 记录，但应将 disposition 设为 non_knowledge，不要单独创建 knowledge_unit。
 - source_excerpt 必须是输入中的连续原文片段，并覆盖该 unit 的支持 claims；不要伪造引用。supporting_claim_ids 必须引用 claims 中的 id。
 - 不要把单型号推广到系列，不要根据型号命名或行业常识推断范围。
@@ -108,6 +111,22 @@ UNDERSTANDING_SYSTEM_PROMPT = """
 - derived 只有在你确实做了原文之外的推断时才为 true；原文的忠实归并或改写必须为 false。
 - 不要回答客户问题，不要使用训练知识，不要询问数据库字段或技术实现。
 - 只返回 JSON，不要 markdown，不要解释。
+""".strip()
+
+
+RUSSIAN_NORMALIZATION_SYSTEM_PROMPT = """
+Ты выполняешь консервативную языковую нормализацию уже извлечённых фактов о продукте.
+Верни только строгий JSON следующего вида:
+{"knowledge_units":[{"index":0,"title":"...","canonical_fact":"..."}]}
+
+Правила:
+- title и canonical_fact каждого элемента должны быть на русском языке.
+- Переводи и стабильно переформулируй только уже предложенный факт; не добавляй сведения, которых в proposed_fact нет, и не удаляй условия, ограничения, отрицания, версии, регионы, числа или значения параметров.
+- Сохраняй без перевода названия продуктов, модели, SKU, бренды, протоколы, стандарты и технические сокращения: TandemVu, H.265, PoE, ONVIF, PTZ и подобные.
+- Не превращай маркетинговое утверждение в техническую характеристику и не делай выводов по отраслевому контексту.
+- Верни ровно один элемент на каждый входной index, не меняй порядок и не объединяй элементы.
+- source_excerpt дан только для проверки смысла и не является текстом для копирования; исходная evidence сохраняется отдельно.
+- Не возвращай markdown, SQL, комментарии или другие поля.
 """.strip()
 
 
@@ -339,6 +358,104 @@ def _postprocess_semantic_units(facts: list[dict]) -> list[dict]:
     return _consolidate_related_units(expanded)
 
 
+def _fact_needs_russian_normalization(fact: dict) -> bool:
+    """Return whether a new Knowledge proposal contains non-Russian prose."""
+
+    content_language = language(_clean(fact.get("content"), 12000))
+    title = _clean(fact.get("title"), 500)
+    title_language = language(title) if title else "und"
+    return content_language != "ru" or title_language in {"en", "zh"}
+
+
+def _has_russian_prose(value: str) -> bool:
+    """Detect Russian prose without misclassifying model/codec tokens."""
+
+    return len(re.findall(r"[А-Яа-яЁё]", str(value or ""))) >= 3
+
+
+def _stable_technical_markers(value: str) -> set[str]:
+    """Collect markers that a translation must preserve verbatim."""
+
+    markers = set()
+    for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9./()_-]*", str(value or "")):
+        token = token.rstrip(".,;:!?")
+        if any(character.isdigit() for character in token) or sum(
+            character.isupper() for character in token if character.isalpha()
+        ) >= 2:
+            markers.add(token.casefold())
+    return markers
+
+
+def _normalize_facts_to_russian(facts: list[dict], llm_service) -> list[dict] | None:
+    """Translate proposed units in one bounded OpenRouter call.
+
+    This is deliberately a proposal-only transformation.  The returned
+    language fields are validated here, while entity/source/provenance fields
+    remain owned by the original extraction result.
+    """
+
+    if not facts:
+        return facts
+    if not any(_fact_needs_russian_normalization(fact) for fact in facts):
+        return facts
+    if llm_service is None or not callable(getattr(llm_service, "extract", None)):
+        log.warning("V2 Russian normalization unavailable; refusing non-Russian Knowledge")
+        return None
+
+    input_units = []
+    for index, fact in enumerate(facts):
+        input_units.append({
+            "index": index,
+            "title": _clean(fact.get("title"), 500),
+            "proposed_fact": _clean(fact.get("content"), 12000),
+            "entity_name": _clean(fact.get("entity_name"), 500),
+            "source_excerpt": _clean(fact.get("source_excerpt"), 12000),
+        })
+    messages = [
+        {"role": "system", "content": RUSSIAN_NORMALIZATION_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": json.dumps({"knowledge_units": input_units}, ensure_ascii=False),
+        },
+    ]
+    try:
+        parsed = parse_json_response(llm_service.extract(messages, max_tokens=1200))
+        units = parsed.get("knowledge_units") if isinstance(parsed, dict) else None
+        if not isinstance(units, list) or len(units) != len(facts):
+            raise ValueError("Russian normalization returned the wrong unit count")
+        by_index = {}
+        for item in units:
+            if not isinstance(item, dict):
+                raise ValueError("Russian normalization returned a non-object unit")
+            index = item.get("index")
+            if not isinstance(index, int) or isinstance(index, bool) or index in by_index:
+                raise ValueError("Russian normalization returned invalid indexes")
+            if index < 0 or index >= len(facts):
+                raise ValueError("Russian normalization returned an out-of-range index")
+            title = _clean(item.get("title"), 500)
+            content = _clean(item.get("canonical_fact"), 12000)
+            if not title or not content or not _has_russian_prose(content):
+                raise ValueError("Russian normalization did not return Russian content")
+            if language(title) not in {"ru", "und"}:
+                raise ValueError("Russian normalization did not return a Russian title")
+            original_content = _clean(facts[index].get("content"), 12000)
+            if not _stable_technical_markers(original_content).issubset(
+                _stable_technical_markers(content)
+            ):
+                raise ValueError("Russian normalization dropped technical markers")
+            by_index[index] = (title, content)
+        if set(by_index) != set(range(len(facts))):
+            raise ValueError("Russian normalization did not cover every unit")
+        result = []
+        for index, fact in enumerate(facts):
+            title, content = by_index[index]
+            result.append(dict(fact, title=title, content=content))
+        return result
+    except Exception:
+        log.exception("V2 Russian normalization failed; refusing non-Russian Knowledge")
+        return None
+
+
 def _model_facts(
     content: str,
     llm_service=None,
@@ -346,9 +463,12 @@ def _model_facts(
     *,
     max_tokens: int = 1600,
     require_coverage: bool = False,
+    normalize_to_russian: bool = False,
+    _retry_contract: bool = False,
 ) -> tuple[list[dict], bool]:
     if llm_service is None:
-        return _fallback_facts(content), True
+        return ([], True) if normalize_to_russian else (_fallback_facts(content), True)
+    extraction_max_tokens = max(max_tokens, 2400) if normalize_to_russian else max_tokens
     messages = [{"role": "system", "content": UNDERSTANDING_SYSTEM_PROMPT}]
     if context:
         context_lines = []
@@ -360,9 +480,18 @@ def _model_facts(
             "role": "user",
             "content": "此前对话上下文：\n" + "\n".join(context_lines),
         })
+    if _retry_contract:
+        messages.append({
+            "role": "user",
+            "content": (
+                "上一次输出没有通过 claims、source_excerpt 或 coverage 校验。"
+                "请重新检查原文的每个明确主张，保持 claim text 和 source_excerpt 为原文连续片段，"
+                "补齐 coverage 后只返回符合约定的 JSON。"
+            ),
+        })
     messages.append({"role": "user", "content": content})
     try:
-        parsed = parse_json_response(llm_service.extract(messages, max_tokens=max_tokens))
+        parsed = parse_json_response(llm_service.extract(messages, max_tokens=extraction_max_tokens))
         if isinstance(parsed, dict) and "knowledge_units" in parsed:
             facts = _structured_knowledge_units(parsed, content)
             if (
@@ -375,8 +504,23 @@ def _model_facts(
                 )
             ):
                 log.warning("V2 semantic extraction contract invalid; keeping a provisional raw interpretation")
-                return _fallback_facts(content), True
-            return _postprocess_semantic_units(facts), False
+                if not _retry_contract:
+                    return _model_facts(
+                        content,
+                        llm_service,
+                        context,
+                        max_tokens=max_tokens,
+                        require_coverage=require_coverage,
+                        normalize_to_russian=normalize_to_russian,
+                        _retry_contract=True,
+                    )
+                return ([], True) if normalize_to_russian else (_fallback_facts(content), True)
+            facts = _postprocess_semantic_units(facts)
+            if normalize_to_russian:
+                facts = _normalize_facts_to_russian(facts, llm_service)
+                if facts is None:
+                    return [], True
+            return facts, False
         raw_facts = parsed.get("facts") if isinstance(parsed, dict) else None
         if not isinstance(raw_facts, list):
             raw_facts = [parsed] if isinstance(parsed, dict) and parsed.get("content") else []
@@ -401,14 +545,39 @@ def _model_facts(
                 parsed.get("coverage") if isinstance(parsed, dict) else None,
             ):
                 log.warning("V2 bulk extraction coverage incomplete; segment remains failed")
-                return _fallback_facts(content), True
+                if not _retry_contract:
+                    return _model_facts(
+                        content,
+                        llm_service,
+                        context,
+                        max_tokens=max_tokens,
+                        require_coverage=require_coverage,
+                        normalize_to_russian=normalize_to_russian,
+                        _retry_contract=True,
+                    )
+                return ([], True) if normalize_to_russian else (_fallback_facts(content), True)
             # Legacy ``facts`` responses already carry the model's intended
             # unit boundaries.  Only repair a single legacy unit; merging an
             # existing multi-fact response would undo its explicit split.
-            return (_postprocess_semantic_units(facts) if len(facts) == 1 else facts), False
+            facts = _postprocess_semantic_units(facts) if len(facts) == 1 else facts
+            if normalize_to_russian:
+                facts = _normalize_facts_to_russian(facts, llm_service)
+                if facts is None:
+                    return [], True
+            return facts, False
     except Exception:
         log.exception("V2 learning understanding failed; keeping a provisional raw interpretation")
-    return _fallback_facts(content), True
+        if not _retry_contract:
+            return _model_facts(
+                content,
+                llm_service,
+                context,
+                max_tokens=max_tokens,
+                require_coverage=require_coverage,
+                normalize_to_russian=normalize_to_russian,
+                _retry_contract=True,
+            )
+    return ([], True) if normalize_to_russian else (_fallback_facts(content), True)
 
 
 def _insert_evidence(
@@ -1395,6 +1564,7 @@ def _learn_bulk_turn(
     llm_service,
     embedding_client,
     had_pending: bool,
+    normalize_to_russian: bool = False,
 ) -> dict:
     """Process every deterministic segment and leave only unresolved work pending."""
 
@@ -1415,7 +1585,10 @@ def _learn_bulk_turn(
         segment_number = int(segment["segment_no"])
         try:
             facts, used_fallback = _model_facts(
-                segment["text"], llm_service, require_coverage=True
+                segment["text"],
+                llm_service,
+                require_coverage=True,
+                normalize_to_russian=normalize_to_russian,
             )
             facts = _deduplicate_facts(facts)
         except Exception:
@@ -1637,6 +1810,7 @@ def learn_turn(
     question_budget: int = 5,
     persisted_evidence: dict | None = None,
     persisted_user_message: dict | None = None,
+    normalize_to_russian: bool = False,
 ) -> dict:
     """Persist one expert turn and advance exactly one atomic confirmation."""
 
@@ -1706,6 +1880,7 @@ def learn_turn(
                 llm_service=llm_service,
                 embedding_client=embedding_client,
                 had_pending=bool(pending or pending_batch),
+                normalize_to_russian=normalize_to_russian,
             )
 
         # A retry after confirmation (or a bare control word in a new thread)
@@ -1875,6 +2050,7 @@ def learn_turn(
             extraction_input,
             llm_service,
             _pending_context(conn, current_thread_id) if pending else None,
+            normalize_to_russian=normalize_to_russian,
         )
         facts = _deduplicate_facts(facts)
         if pending:

@@ -82,6 +82,7 @@ class V2InboxProcessingTest(unittest.TestCase):
 
         claim.assert_called_once_with(conn, 55)
         learn.assert_called_once()
+        self.assertTrue(learn.call_args.kwargs["normalize_to_russian"])
         complete.assert_called_once_with(conn, 55)
         fail.assert_not_called()
         self.assertGreaterEqual(conn.commit.call_count, 2)

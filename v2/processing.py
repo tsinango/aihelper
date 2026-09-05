@@ -167,6 +167,7 @@ def process_inbox_job(
                 question_budget=question_budget,
                 persisted_evidence=evidence,
                 persisted_user_message=user_message,
+                normalize_to_russian=True,
             )
             # The assistant response is durable before the final status flip;
             # startup recovery can safely finish a job interrupted between the
