@@ -51,6 +51,7 @@ class SemanticConsolidationTest(unittest.TestCase):
     def test_prompt_distinguishes_claims_from_semantic_knowledge_units(self):
         self.assertIn("多个 claims 可以支持同一个 knowledge_unit", UNDERSTANDING_SYSTEM_PROMPT)
         self.assertIn("一个句子可能有多个 units，多句话也可能只有一个 unit", UNDERSTANDING_SYSTEM_PROMPT)
+        self.assertIn("每个被映射到 knowledge_unit 的 claim 的技术意义都必须体现在 canonical_fact 中", UNDERSTANDING_SYSTEM_PROMPT)
         self.assertNotIn("每个 facts 项只能包含一个事实", UNDERSTANDING_SYSTEM_PROMPT)
 
     def test_tandemvu_is_one_semantic_unit_with_multiple_claims(self):
@@ -74,9 +75,11 @@ class SemanticConsolidationTest(unittest.TestCase):
                 "derived": False,
             }],
         )
-        facts, fallback = _model_facts(TANDEMVU_SOURCE, SemanticExtractor(response))
+        extractor = SemanticExtractor(response)
+        facts, fallback = _model_facts(TANDEMVU_SOURCE, extractor)
 
         self.assertFalse(fallback)
+        self.assertEqual(len(extractor.calls), 1)
         self.assertEqual(len(facts), 1)
         self.assertEqual(facts[0]["content"], canonical)
         self.assertEqual(facts[0]["supporting_claim_ids"], ["c1", "c2"])

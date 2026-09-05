@@ -78,6 +78,7 @@ UNDERSTANDING_SYSTEM_PROMPT = """
 硬规则：
 - 先完整识别原文中的 claims，但允许多个同义复述、同一能力的解释/直接效果、连续描述同一 feature 的 claims 归并为一个 knowledge_unit。
 - canonical_fact 必须是保守的规范化表达：可删除营销废话、合并同义内容、明确 subject，但不得加入原文没有的信息，不得扩大产品范围，不得丢失条件、版本、地区、firmware、hardware revision、例外或否定边界。
+- 每个被映射到 knowledge_unit 的 claim 的技术意义都必须体现在 canonical_fact 中；不能只保留第一句而静默丢弃后续技术说明。只有确实没有独立可验证产品事实的营销性 claim 才可以标记为 non_knowledge。
 - 只有不同型号、不同独立参数、不同条件/版本/地区，或明确矛盾的事实才必须拆成不同 knowledge_units。一个句子可能有多个 units，多句话也可能只有一个 unit。
 - 能力与其直接解释或结果可以合并。例如“保持全景同时查看局部细节”与“减少变焦/云台导致的盲区”通常是同一技术能力的一个 knowledge_unit；不要为了句号数量拆分。
 - 营销性结论（例如“提升安全性”“优秀用户体验”）如果没有独立可验证的产品事实，可作为 claim 记录，但应将 disposition 设为 non_knowledge，不要单独创建 knowledge_unit。
