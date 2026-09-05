@@ -42,6 +42,8 @@ class LLMService(Protocol):
 
     def complete(self, messages: list[dict], max_tokens: int = 600) -> str: ...
 
+    def complete_json(self, messages: list[dict], max_tokens: int = 600) -> str: ...
+
     def extract(self, messages: list[dict], max_tokens: int = 600) -> str: ...
 
     def judge(self, messages: list[dict], max_tokens: int = 600) -> str: ...
@@ -99,22 +101,31 @@ class OpenRouterLLM:
         # without making the transport an additional production dependency.
         return error.__class__.__name__ in {"TimeoutException", "ConnectTimeout", "ReadTimeout"}
 
-    def complete(self, messages: list[dict], max_tokens: int = 600) -> str:
+    def complete(
+        self,
+        messages: list[dict],
+        max_tokens: int = 600,
+        *,
+        response_format: dict | None = None,
+    ) -> str:
         last_error: Exception | None = None
         for attempt in range(self.max_retries + 1):
             try:
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=messages,
-                    temperature=0,
-                    max_tokens=max_tokens,
+                request = {
+                    "model": self.model,
+                    "messages": messages,
+                    "temperature": 0,
+                    "max_tokens": max_tokens,
                     # OpenRouter's Nemotron endpoint may return a response
                     # with no assistant content when reasoning is left at its
                     # provider default.  Use the native OpenRouter field via
                     # extra_body; the OpenAI-compatible reasoning_effort
                     # parameter is not handled consistently by this endpoint.
-                    extra_body={"reasoning": {"effort": "none"}},
-                )
+                    "extra_body": {"reasoning": {"effort": "none"}},
+                }
+                if response_format is not None:
+                    request["response_format"] = response_format
+                response = self.client.chat.completions.create(**request)
                 choices = getattr(response, "choices", None)
                 if not choices or not getattr(choices[0], "message", None):
                     # OpenRouter can surface a provider-side failure as HTTP
@@ -142,6 +153,15 @@ class OpenRouterLLM:
                     raise
                 time.sleep(2 ** attempt)
         raise OpenRouterRequestError("OpenRouter request failed") from last_error
+
+    def complete_json(self, messages: list[dict], max_tokens: int = 600) -> str:
+        """Request a JSON object while retaining the shared retry policy."""
+
+        return self.complete(
+            messages,
+            max_tokens=max_tokens,
+            response_format={"type": "json_object"},
+        )
 
     def extract(self, messages: list[dict], max_tokens: int = 600) -> str:
         return self.complete(messages, max_tokens=max_tokens)

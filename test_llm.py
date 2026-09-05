@@ -116,6 +116,16 @@ class OpenRouterServiceTest(unittest.TestCase):
     def test_json_parser_recovers_from_model_commentary(self):
         self.assertEqual(parse_json_response('I will comply. {"ok": true}'), {"ok": True})
 
+    def test_complete_json_requests_openrouter_json_object(self):
+        client = FakeClient(['{"action":"NO_CHANGE"}'])
+        service = OpenRouterLLM("test-key", client=client, max_retries=0)
+
+        self.assertEqual(service.complete_json([]), '{"action":"NO_CHANGE"}')
+        self.assertEqual(
+            client.chat.completions.requests[0]["response_format"],
+            {"type": "json_object"},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

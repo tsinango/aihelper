@@ -203,6 +203,29 @@ class LearningLoopTest(unittest.TestCase):
         self.assertEqual(knowledge["trust"], "user_confirmed")
         self.assertTrue(any("SET trust=CASE" in query for query, _ in conn.executed))
 
+    def test_confirmation_passes_llm_to_general_local_organization_review(self):
+        conn = FakeConnection([{
+            "id": 20,
+            "title": "组织信息",
+            "content": "Model A 属于 Brand B 的类别",
+            "entity_name": "Model A",
+            "trust": "user_confirmed",
+            "active": True,
+        }])
+        llm = object()
+        with patch("v2.learning._run_local_organization_review") as review, patch(
+            "v2.learning._update_proposal"
+        ):
+            _confirm(
+                conn,
+                {"id": 30, "confirmed_knowledge_id": 20},
+                {"id": 11, "content": "对"},
+                {"id": 12, "content": "对"},
+                llm_service=llm,
+            )
+        review.assert_called_once()
+        self.assertIs(review.call_args.kwargs["llm_service"], llm)
+
     def test_unknown_and_skip_are_legal_without_reasking_same_proposal(self):
         for answer, expected in (("不知道", "unknown"), ("跳过", "skipped")):
             pending = {"id": 30, "thread_id": 7, "fact_text": "F-X 支持某功能", "confirmed_knowledge_id": 20}

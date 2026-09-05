@@ -594,6 +594,7 @@ def _organization_review_context(conn, knowledge: dict) -> dict:
             JOIN v2_raw_evidence e ON e.id=s.raw_evidence_id
             WHERE s.knowledge_id=%s AND s.active=TRUE
             ORDER BY s.id
+            LIMIT 8
             """,
             (int(knowledge_id),),
         )
@@ -601,11 +602,11 @@ def _organization_review_context(conn, knowledge: dict) -> dict:
     if source_texts:
         context["content"] = "\n".join(
             [str(knowledge.get("content") or "")] + source_texts
-        )
+        )[:24000]
     return context
 
 
-def _run_local_organization_review(conn, knowledge: dict) -> dict:
+def _run_local_organization_review(conn, knowledge: dict, *, llm_service=None) -> dict:
     """Best-effort organization after a fact is durably confirmed.
 
     Organization is deliberately isolated behind a savepoint.  A malformed
@@ -614,18 +615,15 @@ def _run_local_organization_review(conn, knowledge: dict) -> dict:
     """
 
     try:
-        from v2.organization import (
-            extract_explicit_chain,
-            local_organization_review,
-        )
+        from v2.organization import review_local_organization
 
         transaction = conn.transaction() if callable(getattr(conn, "transaction", None)) else nullcontext()
         with transaction:
             context = _organization_review_context(conn, knowledge)
-            return local_organization_review(
+            return review_local_organization(
                 conn,
                 context,
-                explicit_chain=extract_explicit_chain(context),
+                llm_service=llm_service,
             )
     except Exception:
         log.exception(
@@ -647,6 +645,7 @@ def _confirm(
     message: dict,
     *,
     embedding_client=None,
+    llm_service=None,
 ) -> dict:
     if proposal.get("status") not in (None, "pending_confirmation"):
         raise ValueError("only a pending V2 proposal can be confirmed")
@@ -664,7 +663,7 @@ def _confirm(
             WHERE id=%s AND active=TRUE
               AND trust IN ('official_source', 'user_confirmed', 'provisional')
             RETURNING id, title, content, entity_name, trust, active,
-                      created_at, updated_at
+                      entity_id, created_at, updated_at
             """,
             (knowledge_id,),
         )
@@ -699,7 +698,7 @@ def _confirm(
         " ".join(filter(None, (knowledge.get("entity_name"), knowledge.get("title"), knowledge.get("content")))),
         embedder=embedding_client,
     )
-    _run_local_organization_review(conn, knowledge)
+    _run_local_organization_review(conn, knowledge, llm_service=llm_service)
     return knowledge
 
 
@@ -1057,6 +1056,7 @@ def _confirm_batch(
     *,
     segment_numbers: set[int] | None = None,
     embedding_client=None,
+    llm_service=None,
 ) -> int:
     with conn.cursor() as cur:
         cur.execute(
@@ -1081,7 +1081,14 @@ def _confirm_batch(
         if segment_numbers is None or int(item.get("segment_no") or 0) in segment_numbers
     ]
     for proposal in selected:
-        _confirm(conn, proposal, evidence, message, embedding_client=embedding_client)
+        _confirm(
+            conn,
+            proposal,
+            evidence,
+            message,
+            embedding_client=embedding_client,
+            llm_service=llm_service,
+        )
     return len(selected)
 
 
@@ -1487,6 +1494,7 @@ def learn_turn(
                 user_message,
                 segment_numbers=selected,
                 embedding_client=embedding_client,
+                llm_service=llm_service,
             )
             # A partial confirmation gets a fresh prompt for the remaining
             # clear facts. This is also a repetition guard for the batch UX.
@@ -1526,6 +1534,7 @@ def learn_turn(
                 evidence,
                 user_message,
                 embedding_client=embedding_client,
+                llm_service=llm_service,
             )
             next_message, _, next_proposal = _next_question(conn, current_thread_id, session)
             if next_message:
