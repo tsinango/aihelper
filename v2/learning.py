@@ -486,7 +486,8 @@ def _ask(conn, proposal: dict, session: dict) -> tuple[dict | None, str | None]:
         if not text:
             text = safe_question({"entity_name": proposal.get("entity_name", "")})
     else:
-        text = f"我理解为：{proposal['fact_text']}。对吗？"
+        fact_text = re.sub(r"[。.!！?？]+$", "", str(proposal["fact_text"] or "").strip())
+        text = f"我理解为：{fact_text}。对吗？"
     message_type = (
         "clarification"
         if proposal.get("status") == "pending_clarification"

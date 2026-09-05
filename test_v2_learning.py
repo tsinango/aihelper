@@ -255,6 +255,17 @@ class LearningLoopTest(unittest.TestCase):
         self.assertIn("F-X 支持某功能", text)
         count.assert_not_called()
 
+    def test_confirmation_question_does_not_duplicate_terminal_punctuation(self):
+        message = {"id": 40, "thread_id": 7, "content": "question"}
+        with patch("v2.learning._insert_message", return_value=message):
+            result, text = _ask(
+                FakeConnection([]),
+                {"id": 30, "thread_id": 7, "fact_text": "Model X supports rack."},
+                {"id": 9, "_unlimited_questions": True},
+            )
+        self.assertEqual(result, message)
+        self.assertEqual(text, "我理解为：Model X supports rack。对吗？")
+
     def test_clarification_question_is_not_a_confirmation_recap(self):
         message = {"id": 40, "thread_id": 7, "content": "新版具体指哪个硬件 revision？"}
         with patch("v2.learning._insert_message", return_value=message) as insert:
