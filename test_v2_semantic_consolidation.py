@@ -8,6 +8,7 @@ from v2.learning import (
     _consolidate_related_units,
     _model_facts,
     _postprocess_semantic_units,
+    _structured_knowledge_units,
     learn_turn,
 )
 
@@ -125,6 +126,27 @@ class SemanticConsolidationTest(unittest.TestCase):
         self.assertEqual(facts[0]["content"], canonical)
         self.assertEqual(facts[0]["supporting_claim_ids"], ["c1", "c2"])
         self.assertEqual(facts[0]["source_excerpt"], TANDEMVU_SOURCE)
+
+    def test_claim_ids_narrow_a_whole_document_excerpt_to_confirmed_claims(self):
+        source = "Model X supports rack. Model X belongs to NVR."
+        parsed = semantic_response(
+            source,
+            [("c1", "Model X supports rack", [0], "knowledge")],
+            [{
+                "title": "Монтаж в стойку",
+                "canonical_fact": "Model X supports rack.",
+                "entity_name": "Model X",
+                "supporting_claim_ids": ["c1"],
+                # A model may conservatively quote the whole raw input. The
+                # parser must still persist only the claim-backed excerpt.
+                "source_excerpt": source,
+            }],
+        )
+
+        facts = _structured_knowledge_units(parsed, source)
+
+        self.assertEqual(facts[0]["source_excerpt"], "Model X supports rack")
+        self.assertNotIn("belongs to NVR", facts[0]["source_excerpt"])
 
     def test_cohesive_prose_is_not_split_into_sentence_segments(self):
         segments = segment_bulk_text(TANDEMVU_SOURCE)

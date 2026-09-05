@@ -60,6 +60,14 @@
     @media (prefers-reduced-motion: reduce){.thinking-dots i{animation:none;opacity:.7}}
     .chat-error{margin:0 12px 8px;display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
     .chat-error button{flex:none}
+    .proposal-editor{position:fixed;left:50%;bottom:12px;z-index:30;transform:translateX(-50%);width:min(820px,calc(100vw - 24px));margin:0;padding:12px;background:#f8fafc;border:1px solid var(--line);border-radius:12px;box-shadow:0 10px 30px #10182826;max-height:45vh;overflow:auto}
+    .proposal-editor h2{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:15px;margin:0 0 10px}
+    .proposal-editor-close{min-height:32px;padding:5px 9px;font-size:12px}
+    .proposal-item{padding:10px 0;border-top:1px solid var(--line)}
+    .proposal-item:first-child{border-top:0;padding-top:0}
+    .proposal-item-text{white-space:pre-wrap;overflow-wrap:anywhere;margin-bottom:8px}
+    .proposal-item-actions{display:flex;gap:7px}
+    .proposal-item textarea{width:100%;min-height:76px;resize:vertical;border:1px solid #cbd5e1;border-radius:8px;padding:8px;margin-bottom:7px}
     .composer{display:flex;gap:8px;padding:10px 12px;background:#fff;border-top:1px solid var(--line);align-items:flex-end;flex:none}
     .composer textarea{flex:1;min-width:0;min-height:42px;max-height:140px;resize:none;border:1px solid #cbd5e1;border-radius:12px;padding:10px 12px;font-size:16px;line-height:1.4}
     .composer textarea:focus{outline:2px solid #bfdbfe;border-color:var(--blue)}
@@ -129,6 +137,10 @@
     </form>
     <p id="composer-note" class="composer-note">Enter 发送 · Shift + Enter 换行</p>
   </main>
+  <section id="proposal-editor" class="proposal-editor" aria-label="待确认知识编辑" hidden>
+    <h2>查看并编辑 <button id="proposal-editor-close" class="proposal-editor-close" type="button">收起</button></h2>
+    <div id="proposal-list"></div>
+  </section>
   <div id="drawer-backdrop" class="drawer-backdrop" hidden></div>
   <aside id="thread-drawer" class="thread-drawer" aria-label="最近对话">
     <div class="panel-heading">
@@ -150,7 +162,8 @@
     const THINKING_SLOW_MS = 10000;
     const WORKER_UNAVAILABLE_MESSAGE = '后台知识处理服务暂时不可用。内容已经保存，后台处理恢复后会继续。';
     const isCoarse = typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia('(pointer: coarse)').matches;
-    const state = {threads: [], threadId: null, lastMessages: [], inboxRequest: 0, threadRequest: 0, sending: false, failedContent: '', requestKey: '', activeJob: null, failedJob: null, workerHealthy: null, workerUnavailable: false, pollTimer: 0, pollFailures: 0, thinkingStartedAt: 0, slowTimer: 0};
+    const requestedThread = typeof location !== 'undefined' ? new URLSearchParams(location.search).get('thread') : null;
+    const state = {threads: [], threadId: requestedThread || null, lastMessages: [], inboxRequest: 0, threadRequest: 0, sending: false, failedContent: '', requestKey: '', activeJob: null, failedJob: null, workerHealthy: null, workerUnavailable: false, pollTimer: 0, pollFailures: 0, thinkingStartedAt: 0, slowTimer: 0, proposals: []};
     const keyInput = $('api-key');
     if (keyInput) keyInput.value = getStoredKey();
 
@@ -316,9 +329,9 @@
     }
 
     function quickReplyLabels(messageType) {
-      if (messageType === 'batch_confirmation') return ['全部确认明确知识', '查看明细', '我来修正'];
+      if (messageType === 'batch_confirmation') return ['全部确认', '查看并编辑'];
       if (messageType === 'clarification') return ['我来回答', '不知道', '跳过'];
-      return ['对', '不对，我来修正', '不知道', '跳过'];
+      return ['对', '查看并编辑', '不知道', '跳过'];
     }
 
     function renderQuickReplies(container, messageType) {
@@ -331,8 +344,12 @@
         button.textContent = label;
         button.onclick = () => {
           if (state.sending) return;
-          const action = (label === '我来修正' || label === '不对，我来修正') ? 'correct' : label;
-          if (action === 'correct' || action === '我来回答') {
+          const action = label === '查看并编辑' ? 'edit' : label;
+          if (action === 'edit') {
+            openProposalEditor();
+            return;
+          }
+          if (action === '我来回答') {
             const input = $('message-input');
             if (input) input.focus();
             return;
@@ -342,6 +359,99 @@
         replies.append(button);
       }
       container.append(replies);
+    }
+
+    function closeProposalEditor() {
+      const editor = $('proposal-editor');
+      if (editor) editor.hidden = true;
+    }
+    $('proposal-editor-close').addEventListener('click', closeProposalEditor);
+
+    function renderProposalEditor() {
+      const editor = $('proposal-editor');
+      const list = $('proposal-list');
+      if (!editor || !list) return;
+      list.replaceChildren();
+      if (!state.proposals.length) {
+        list.textContent = '当前没有可编辑的待确认知识。';
+        return;
+      }
+      for (const proposal of state.proposals) {
+        const item = document.createElement('article');
+        item.className = 'proposal-item';
+        const text = document.createElement('div');
+        text.className = 'proposal-item-text';
+        text.textContent = `${proposal.segment_no ? `第${proposal.segment_no}项：` : ''}${proposal.fact_text || ''}`;
+        const actions = document.createElement('div');
+        actions.className = 'proposal-item-actions';
+        const edit = document.createElement('button');
+        edit.type = 'button';
+        edit.textContent = '编辑';
+        edit.onclick = () => renderProposalEditForm(item, proposal);
+        const remove = document.createElement('button');
+        remove.type = 'button';
+        remove.textContent = '删除';
+        remove.onclick = () => deleteProposal(proposal.id);
+        actions.append(edit, remove);
+        item.append(text, actions);
+        list.append(item);
+      }
+    }
+
+    function renderProposalEditForm(item, proposal) {
+      item.replaceChildren();
+      const field = document.createElement('textarea');
+      field.value = proposal.fact_text || '';
+      const actions = document.createElement('div');
+      actions.className = 'proposal-item-actions';
+      const save = document.createElement('button');
+      save.type = 'button';
+      save.textContent = '保存';
+      save.onclick = () => saveProposal(proposal, field.value);
+      const cancel = document.createElement('button');
+      cancel.type = 'button';
+      cancel.textContent = '取消';
+      cancel.onclick = renderProposalEditor;
+      actions.append(save, cancel);
+      item.append(field, actions);
+      field.focus();
+    }
+
+    async function openProposalEditor() {
+      if (!state.threadId || state.sending || state.activeJob) return;
+      try {
+        const data = await api(`/api/v2/inbox/threads/${encodeURIComponent(state.threadId)}/proposals`, {}, POLL_TIMEOUT_MS);
+        state.proposals = Array.isArray(data.items) ? data.items : [];
+        const editor = $('proposal-editor');
+        if (editor) editor.hidden = false;
+        renderProposalEditor();
+      } catch (error) {
+        showChatError(error.message || '暂时无法加载待确认知识');
+      }
+    }
+
+    async function saveProposal(proposal, factText) {
+      const content = String(factText || '').trim();
+      if (!content) return;
+      try {
+        const updated = await api(`/api/v2/inbox/proposals/${encodeURIComponent(proposal.id)}`, {
+          method: 'PATCH', body: JSON.stringify({fact_text: content}),
+        }, POLL_TIMEOUT_MS);
+        state.proposals = state.proposals.map(item => String(item.id) === String(updated.id) ? updated : item);
+        renderProposalEditor();
+      } catch (error) {
+        showChatError(error.message || '保存编辑失败');
+      }
+    }
+
+    async function deleteProposal(proposalId) {
+      try {
+        await api(`/api/v2/inbox/proposals/${encodeURIComponent(proposalId)}`, {method: 'DELETE'}, POLL_TIMEOUT_MS);
+        state.proposals = state.proposals.filter(item => String(item.id) !== String(proposalId));
+        renderProposalEditor();
+      } catch (error) {
+        showChatError(error.message || '删除待确认知识失败');
+      }
     }
 
     function renderMessages(data) {

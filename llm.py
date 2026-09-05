@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from typing import Protocol, runtime_checkable
 
@@ -10,6 +11,8 @@ from openai import APIConnectionError, APITimeoutError, OpenAI
 OPENROUTER_PROVIDER = "openrouter"
 OPENROUTER_DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_DEFAULT_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
+V2_LEARNING_MODEL_DEFAULT = "openai/gpt-oss-20b:free"
+V2_LEARNING_MODEL = os.getenv("V2_LEARNING_MODEL", V2_LEARNING_MODEL_DEFAULT).strip() or V2_LEARNING_MODEL_DEFAULT
 OPENROUTER_DEFAULT_TIMEOUT_SECONDS = 30.0
 OPENROUTER_MAX_RETRIES = 2
 TRANSIENT_STATUS_CODES = frozenset({408, 409, 429, 500, 502, 503, 504})
@@ -45,6 +48,10 @@ class LLMService(Protocol):
     def complete_json(self, messages: list[dict], max_tokens: int = 600) -> str: ...
 
     def extract(self, messages: list[dict], max_tokens: int = 600) -> str: ...
+
+    def extract_structured(
+        self, messages: list[dict], schema: dict, max_tokens: int = 600
+    ) -> str: ...
 
     def judge(self, messages: list[dict], max_tokens: int = 600) -> str: ...
 
@@ -107,12 +114,13 @@ class OpenRouterLLM:
         max_tokens: int = 600,
         *,
         response_format: dict | None = None,
+        model: str | None = None,
     ) -> str:
         last_error: Exception | None = None
         for attempt in range(self.max_retries + 1):
             try:
                 request = {
-                    "model": self.model,
+                    "model": model or self.model,
                     "messages": messages,
                     "temperature": 0,
                     "max_tokens": max_tokens,
@@ -165,6 +173,19 @@ class OpenRouterLLM:
 
     def extract(self, messages: list[dict], max_tokens: int = 600) -> str:
         return self.complete(messages, max_tokens=max_tokens)
+
+    def extract_structured(self, messages: list[dict], schema: dict, max_tokens: int = 600) -> str:
+        if not V2_LEARNING_MODEL.endswith(":free"):
+            raise RuntimeError("V2_LEARNING_MODEL must be a free OpenRouter model")
+        return self.complete(
+            messages,
+            max_tokens=max_tokens,
+            model=V2_LEARNING_MODEL,
+            response_format={
+                "type": "json_schema",
+                "json_schema": schema,
+            },
+        )
 
     def judge(self, messages: list[dict], max_tokens: int = 600) -> str:
         return self.complete(messages, max_tokens=max_tokens)

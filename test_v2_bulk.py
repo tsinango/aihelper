@@ -331,6 +331,20 @@ class BulkIntakeTest(unittest.TestCase):
         self.assertEqual(classify_reply("否"), "negative")
         self.assertEqual(classify_reply("нет"), "negative")
 
+    def test_explicit_limitations_do_not_become_unclear(self):
+        self.assertFalse(requires_individual_confirmation({
+            "content": "4K доступно до 25 кадров/с, а 1080p — до 60 кадров/с; 4K при 60 кадрах/с не поддерживается.",
+            "derived": False,
+        }))
+        self.assertFalse(requires_individual_confirmation({
+            "content": "Фиксированное количество дней хранения нельзя вывести только из модели камеры.",
+            "derived": False,
+        }))
+        self.assertTrue(requires_individual_confirmation({
+            "content": "Hardware revision B не поддерживает функцию.",
+            "derived": False,
+        }))
+
     def test_same_question_not_repeated(self):
         previous = {
             "id": 12,

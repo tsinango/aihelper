@@ -447,6 +447,96 @@ def list_knowledge_for_entity(conn, entity_id: int, *, limit: int = 100) -> list
         return [_dict(row) for row in cur.fetchall()]
 
 
+def list_editable_proposals(conn, thread_id: int) -> dict:
+    """Return pending proposals for the Inbox editor without touching evidence."""
+
+    proposal_columns = """
+        SELECT id, batch_id, segment_no, fact_text, entity_name,
+               status, comparison_result, source_message_id,
+               confirmed_knowledge_id, created_at, updated_at
+        FROM v2_learning_proposals
+        WHERE thread_id=%s AND paused=FALSE
+          AND status IN ('pending_confirmation', 'pending_clarification')
+    """
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, thread_id, raw_evidence_id, total_segments,
+                   processed_segments, failed_segments, status
+            FROM v2_learning_batches
+            WHERE thread_id=%s
+              AND status IN ('processing', 'awaiting_confirmation',
+                             'awaiting_clarification', 'partial')
+            ORDER BY id DESC LIMIT 1
+            """,
+            (int(thread_id),),
+        )
+        batch = _dict(cur.fetchone())
+        if not batch:
+            # The same minimal editor is useful for a single pending
+            # proposal. It still exposes only fact_text, never raw input.
+            cur.execute(
+                proposal_columns + " AND batch_id IS NULL ORDER BY id LIMIT 1",
+                (int(thread_id),),
+            )
+            return {"batch": None, "items": [_dict(row) for row in cur.fetchall()]}
+        cur.execute(
+            proposal_columns + " AND batch_id=%s ORDER BY segment_no NULLS LAST, id",
+            (int(thread_id), int(batch["id"])),
+        )
+        return {"batch": batch, "items": [_dict(row) for row in cur.fetchall()]}
+
+
+def edit_pending_proposal(conn, proposal_id: int, fact_text: str) -> dict:
+    """Edit only the proposal text; source evidence and links stay untouched."""
+
+    clean = str(fact_text or "").strip()
+    if not clean:
+        raise ValueError("proposal text must not be empty")
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE v2_learning_proposals
+            SET fact_text=%s, updated_at=CURRENT_TIMESTAMP
+            WHERE id=%s AND paused=FALSE
+              AND status IN ('pending_confirmation', 'pending_clarification')
+            RETURNING id, thread_id, batch_id, segment_no, fact_text,
+                      entity_name, status, comparison_result,
+                      source_message_id, confirmed_knowledge_id,
+                      created_at, updated_at
+            """,
+            (clean, int(proposal_id)),
+        )
+        row = cur.fetchone()
+    if not row:
+        raise V2NotFound("editable V2 proposal was not found")
+    return _dict(row)
+
+
+def reject_pending_proposal(conn, proposal_id: int) -> dict:
+    """Soft-delete a proposal while retaining its raw evidence provenance."""
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE v2_learning_proposals
+            SET status='rejected', updated_at=CURRENT_TIMESTAMP
+            WHERE id=%s AND paused=FALSE
+              AND status IN ('pending_confirmation', 'pending_clarification')
+            RETURNING id, thread_id, batch_id, segment_no, fact_text,
+                      entity_name, status, comparison_result,
+                      source_message_id, confirmed_knowledge_id,
+                      created_at, updated_at
+            """,
+            (int(proposal_id),),
+        )
+        row = cur.fetchone()
+    if not row:
+        raise V2NotFound("deletable V2 proposal was not found")
+    return _dict(row)
+
+
 def list_entity_tree(conn) -> dict:
     """Build a small read-only tree for the Knowledge page.
 

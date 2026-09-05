@@ -77,18 +77,26 @@
       return values.map(item => typeof item === 'string' ? item : value(item, 'title', 'name', 'label')).filter(Boolean).map(String);
     }
 
+    function editInInbox() {
+      if (state.threadId) {
+        window.location.assign(`/inbox?thread=${encodeURIComponent(state.threadId)}`);
+        return;
+      }
+      input.focus();
+    }
+
     function renderQuickReplies(container, messageType) {
       const replies = document.createElement('div');
       replies.className = 'quick-replies';
       replies.setAttribute('aria-label', '快速回复');
       const labels = messageType === 'clarification'
-        ? ['我来修正', '不知道', '跳过']
-        : ['对', '我来修正', '不知道', '跳过'];
+        ? ['查看并编辑', '不知道', '跳过']
+        : ['对', '查看并编辑', '不知道', '跳过'];
       for (const label of labels) {
         const button = document.createElement('button');
         button.type = 'button';
         button.textContent = label;
-        button.onclick = () => label === '我来修正' ? input.focus() : send(label);
+        button.onclick = () => label === '查看并编辑' ? editInInbox() : send(label);
         replies.append(button);
       }
       container.append(replies);

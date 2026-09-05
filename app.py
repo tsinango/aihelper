@@ -50,9 +50,12 @@ from v2.service import (
     inbox_snapshot,
     json_safe,
     list_documents,
+    list_editable_proposals,
     list_knowledge,
     list_knowledge_for_entity,
     list_entity_tree,
+    edit_pending_proposal,
+    reject_pending_proposal,
     thread_response,
     worker_health,
 )
@@ -1889,6 +1892,43 @@ def v2_knowledge(
         items = list_knowledge_for_entity(conn, entity_id) if entity_id is not None else list_knowledge(conn)
         tree = list_entity_tree(conn)
     return json_safe({"items": items, "total": len(items), "tree": tree})
+
+
+@app.get("/api/v2/inbox/threads/{thread_id}/proposals")
+def v2_inbox_proposals(thread_id: int, x_api_key: str | None = Header(None)):
+    auth(x_api_key)
+    try:
+        with db() as conn:
+            return json_safe(list_editable_proposals(conn, int(thread_id)))
+    except V2NotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.patch("/api/v2/inbox/proposals/{proposal_id}")
+def v2_edit_inbox_proposal(
+    proposal_id: int,
+    body: dict = Body(...),
+    x_api_key: str | None = Header(None),
+):
+    auth(x_api_key)
+    content = str(body.get("fact_text") or body.get("content") or "").strip()
+    if not content or len(content) > 12000:
+        raise HTTPException(400, "proposal text must contain 1-12000 characters")
+    try:
+        with db() as conn:
+            return json_safe(edit_pending_proposal(conn, int(proposal_id), content))
+    except V2NotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.delete("/api/v2/inbox/proposals/{proposal_id}")
+def v2_delete_inbox_proposal(proposal_id: int, x_api_key: str | None = Header(None)):
+    auth(x_api_key)
+    try:
+        with db() as conn:
+            return json_safe(reject_pending_proposal(conn, int(proposal_id)))
+    except V2NotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
 
 
 @app.get("/api/v2/entities/tree")

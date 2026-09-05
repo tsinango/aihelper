@@ -170,6 +170,36 @@ class LearningLoopTest(unittest.TestCase):
         self.assertTrue(any("source_kind, relation" in query and "user_confirmation" in str(params) for query, params in conn.executed))
         self.assertTrue(any("SET status=%s" in query and params[0] == "confirmed" for query, params in conn.executed))
 
+    def test_confirmation_saves_the_edited_proposal_text(self):
+        conn = FakeConnection([{
+            "id": 20,
+            "title": "高度",
+            "content": "старый текст",
+            "entity_name": "F-NR-208E/2",
+            "trust": "user_confirmed",
+            "active": True,
+        }, {
+            "id": 30,
+            "thread_id": 7,
+            "source_message_id": 11,
+            "fact_text": "исправленный текст",
+            "status": "confirmed",
+            "confirmed_knowledge_id": 20,
+        }])
+
+        _confirm(
+            conn,
+            {"id": 30, "confirmed_knowledge_id": 20, "fact_text": "исправленный текст"},
+            {"id": 11, "content": "对"},
+            {"id": 12, "content": "对"},
+        )
+
+        knowledge_update = next(
+            (params for query, params in conn.executed if query.startswith("UPDATE v2_knowledge")),
+            None,
+        )
+        self.assertEqual(knowledge_update[0], "исправленный текст")
+
     def test_knowledge_save_survives_org_review_failure(self):
         conn = FakeConnection([{
             "id": 20,
@@ -202,6 +232,32 @@ class LearningLoopTest(unittest.TestCase):
             )
         self.assertEqual(knowledge["trust"], "user_confirmed")
         self.assertTrue(any("SET trust=CASE" in query for query, _ in conn.executed))
+
+    def test_legacy_batch_details_reuse_existing_message(self):
+        from v2.learning import _batch_detail_message
+
+        detail = "这批资料的明细：\n- 第1项：F-X 支持 PoE"
+        existing = {
+            "id": 70,
+            "thread_id": 7,
+            "sequence_no": 4,
+            "role": "assistant",
+            "message_type": "batch_confirmation",
+            "content": detail,
+        }
+        conn = FakeConnection([existing])
+        batch = {
+            "id": 41,
+            "thread_id": 7,
+            "clear_facts": [{"segment_no": 1, "content": "F-X 支持 PoE"}],
+            "unclear_items": [],
+        }
+
+        message, text = _batch_detail_message(conn, batch)
+
+        self.assertEqual(message["id"], 70)
+        self.assertEqual(text, detail)
+        self.assertFalse(any("INSERT INTO v2_inbox_messages" in query for query, _ in conn.executed))
 
     def test_confirmation_passes_llm_to_general_local_organization_review(self):
         conn = FakeConnection([{

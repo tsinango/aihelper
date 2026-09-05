@@ -34,9 +34,12 @@ _KEY_VALUE_LINE = re.compile(r"(?m)^[ \t]*[^\n:：]{1,80}[：:][^\n]+$")
 _SENTENCE_END = re.compile(r"(?<=[。！？!?；;])\s*")
 _MODEL_TOKEN = re.compile(r"\b[A-Za-zА-Яа-я][A-Za-zА-Яа-я0-9./()_-]*\d[A-Za-zА-Яа-я0-9./()_-]*\b")
 _INDIVIDUAL_CONFIRMATION_MARKERS = (
-    "不支持", "不兼容", "否定", "仅", "只有", "除非", "例外", "条件", "整个系列",
-    "所有型号", "适用于系列", "hardware revision", "firmware", "revision",
-    "не поддерж", "только", "кроме", "исключ",
+    # Explicit limitations are still clear evidence and should be eligible
+    # for the batch confirmation. Only boundaries that need a separate scope
+    # decision remain individual: version/revision, family-wide claims, and
+    # explicit exceptions or unresolved conditions.
+    "整个系列", "所有型号", "适用于系列", "hardware revision", "firmware", "revision",
+    "除非", "例外", "услови", "кроме", "исключ",
 )
 
 

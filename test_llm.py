@@ -7,6 +7,8 @@ from llm import (
     OPENROUTER_DEFAULT_BASE_URL,
     OPENROUTER_DEFAULT_MODEL,
     OPENROUTER_PROVIDER,
+    V2_LEARNING_MODEL,
+    V2_LEARNING_MODEL_DEFAULT,
     OpenRouterLLM,
     OpenRouterRequestError,
     parse_json_response,
@@ -35,7 +37,7 @@ class FakeClient:
 
 class OpenRouterServiceTest(unittest.TestCase):
     def test_internal_interface_and_openrouter_defaults(self):
-        client = FakeClient(['{"answer":"ok"}'] * 3)
+        client = FakeClient(['{"answer":"ok"}'] * 4)
         service = OpenRouterLLM("test-key", client=client, max_retries=0)
 
         self.assertIsInstance(service, LLMService)
@@ -53,6 +55,20 @@ class OpenRouterServiceTest(unittest.TestCase):
             client.chat.completions.requests[0]["extra_body"],
             {"reasoning": {"effort": "none"}},
         )
+
+    def test_learning_extraction_uses_free_structured_output_model(self):
+        client = FakeClient(['{"claims":[],"knowledge_units":[],"coverage":{}}'])
+        service = OpenRouterLLM("test-key", client=client, max_retries=0)
+        schema = {"name": "learning", "strict": True, "schema": {"type": "object"}}
+
+        service.extract_structured([], schema)
+
+        request = client.chat.completions.requests[0]
+        self.assertEqual(V2_LEARNING_MODEL, V2_LEARNING_MODEL_DEFAULT)
+        self.assertEqual(request["model"], V2_LEARNING_MODEL)
+        self.assertEqual(request["response_format"], {
+            "type": "json_schema", "json_schema": schema,
+        })
 
     @patch("llm.OpenAI")
     def test_default_client_uses_openrouter_endpoint_and_disables_sdk_retries(self, openai):

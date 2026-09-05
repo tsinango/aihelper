@@ -39,14 +39,19 @@ class V2UiTest(unittest.TestCase):
     def test_learning_quick_replies_only_follow_latest_assistant_question(self):
         for page in INTERACTIVE_PAGES:
             content = (ROOT / "templates" / page).read_text()
-            for label in ("对", "我来修正", "不知道", "跳过"):
+            for label in ("对", "查看并编辑", "不知道", "跳过"):
                 self.assertIn(label, content, page)
             self.assertIn("quick-replies", content, page)
             self.assertIn("message_type", content, page)
             self.assertIn("clarification", content, page)
             self.assertIn("lastIndex", content, page)
-            self.assertIn("label === '我来修正'", content, page)
+            self.assertIn("label === '查看并编辑'", content, page)
             self.assertTrue("input.focus()" in content or "$('message-input').focus()" in content, page)
+        self.assertIn("window.location.assign(`/inbox?thread=", (ROOT / "templates" / "chat.html").read_text())
+        inbox = (ROOT / "templates" / "inbox.html").read_text()
+        self.assertIn("/api/v2/inbox/threads/${encodeURIComponent(state.threadId)}/proposals", inbox)
+        self.assertIn("/api/v2/inbox/proposals/${encodeURIComponent(proposal.id)}", inbox)
+        self.assertIn("proposal-editor-close", inbox)
 
     def test_api_key_is_a_compact_session_storage_setting(self):
         for page in KEY_SETTINGS_PAGES:

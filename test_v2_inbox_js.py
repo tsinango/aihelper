@@ -144,10 +144,10 @@ const THREAD_SNAPSHOT = {
   });
   await sleep(0);
   ok(localStorage.getItem('inbox-thread-id') === '7', 'current thread persisted across reloads');
-  ok(JSON.stringify(quickReplyTexts()) === JSON.stringify(['对', '不对，我来修正', '不知道', '跳过']),
-    'confirmation question offers confirm/correct/unknown/skip');
-  ok(JSON.stringify(T.quickReplyLabels('batch_confirmation')) === JSON.stringify(['全部确认明确知识', '查看明细', '我来修正']),
-    'bulk confirmation offers one-click review controls');
+  ok(JSON.stringify(quickReplyTexts()) === JSON.stringify(['对', '查看并编辑', '不知道', '跳过']),
+    'confirmation question offers confirm/edit/unknown/skip');
+  ok(JSON.stringify(T.quickReplyLabels('batch_confirmation')) === JSON.stringify(['全部确认', '查看并编辑']),
+    'bulk confirmation offers confirm/edit controls');
   ok(byId['count-week']._text === '+12', 'week count renders with + prefix');
 
   // Successful send: optimistic message, short 202 submit, job polling, then
@@ -207,7 +207,7 @@ const THREAD_SNAPSHOT = {
   ok(byId['send-button'].disabled === false, 'send button re-enabled after reply');
   ok(byId['message-input'].value === '', 'input cleared after send');
   const qr = quickReplyTexts();
-  ok(qr && qr.includes('对') && qr.includes('不对，我来修正'), 'quick replies reappear after AI question');
+  ok(qr && qr.includes('对') && qr.includes('查看并编辑'), 'quick replies reappear after AI question');
 
   // Failure path: error bubble, re-enabled button, retry resends the same content.
   byId['message-input'].value = '失败内容';

@@ -8,7 +8,6 @@ recap.  This module is intentionally independent from the V1 review code.
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 from contextlib import nullcontext
@@ -78,7 +77,9 @@ UNDERSTANDING_SYSTEM_PROMPT = """
     "entity_name":"明确型号或产品名，没有就空字符串",
     "supporting_claim_ids":["c1"],
     "source_excerpt":"覆盖支持 claims 的连续原文片段",
-    "derived":false
+    "derived":false,
+    "scope":"适用范围，没有则为空字符串",
+    "conditions":[]
   }],
   "coverage":{
     "complete":true,
@@ -98,6 +99,7 @@ UNDERSTANDING_SYSTEM_PROMPT = """
 - 不要因为 subject 相同或句子中出现“and/以及”就合并独立属性。例如“The camera has 8 MP resolution and supports PoE.”必须输出两个 knowledge_units，分别保留分辨率和供电方式；一个句子不等于一个 unit。
 - 反例与正例： “The camera has 8 MP resolution and supports PoE.” → 两个 units；“The camera keeps the overall scene visible while zooming. This reduces blind spots.” → 一个 unit，后一句作为同一能力的直接效果。请优先遵循这个区别。
 - canonical_fact 不要逐字复制整段输入，也不要把“本段没有说明某参数”这类元评论写成产品事实。只保留可引用的产品结论，通常比原文更短；但不能为变短而丢失技术意义、条件或否定边界。
+- 原文明确写出的限制、否定边界和“无法从资料推导”的结论仍是可引用知识，不是 UNCLEAR，也不是 derived；只有模型自己超出原文做出的推断才将 derived 设为 true。
 - title 和 canonical_fact 必须用俄语书写，无论原文是中文、英文还是其他语言。产品名、型号、SKU、协议名、标准名和常见技术缩写（例如 TandemVu、H.265、PoE、ONVIF、PTZ）保持原样，不要翻译成臆造的名称。entity_name 用于精确匹配，可以保留规范产品名或型号。
 - 营销性结论（例如“提升安全性”“优秀用户体验”）如果没有独立可验证的产品事实，可作为 claim 记录，但应将 disposition 设为 non_knowledge，不要单独创建 knowledge_unit。
 - source_excerpt 必须是输入中的连续原文片段，并覆盖该 unit 的支持 claims；不要伪造引用。supporting_claim_ids 必须引用 claims 中的 id。
@@ -114,20 +116,92 @@ UNDERSTANDING_SYSTEM_PROMPT = """
 """.strip()
 
 
-RUSSIAN_NORMALIZATION_SYSTEM_PROMPT = """
-Ты выполняешь консервативную языковую нормализацию уже извлечённых фактов о продукте.
-Верни только строгий JSON следующего вида:
-{"knowledge_units":[{"index":0,"title":"...","canonical_fact":"..."}]}
-
-Правила:
-- title и canonical_fact каждого элемента должны быть на русском языке.
-- Переводи и стабильно переформулируй только уже предложенный факт; не добавляй сведения, которых в proposed_fact нет, и не удаляй условия, ограничения, отрицания, версии, регионы, числа или значения параметров.
-- Сохраняй без перевода названия продуктов, модели, SKU, бренды, протоколы, стандарты и технические сокращения: TandemVu, H.265, PoE, ONVIF, PTZ и подобные.
-- Не превращай маркетинговое утверждение в техническую характеристику и не делай выводов по отраслевому контексту.
-- Верни ровно один элемент на каждый входной index, не меняй порядок и не объединяй элементы.
-- source_excerpt дан только для проверки смысла и не является текстом для копирования; исходная evidence сохраняется отдельно.
-- Не возвращай markdown, SQL, комментарии или другие поля.
-""".strip()
+# OpenRouter's json_schema format keeps the model responsible for meaning and
+# Python responsible for evidence boundaries.  The schema is intentionally
+# the existing extraction contract, not a new knowledge model.
+LEARNING_EXTRACTION_SCHEMA = {
+    "name": "v2_learning_extraction",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["claims", "knowledge_units", "coverage"],
+        "properties": {
+            "claims": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["id", "text"],
+                    "properties": {
+                        "id": {"type": "string"},
+                        "text": {"type": "string"},
+                    },
+                },
+            },
+            "knowledge_units": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": [
+                        "title", "canonical_fact", "entity_name",
+                        "supporting_claim_ids", "source_excerpt", "derived",
+                        "scope", "conditions",
+                    ],
+                    "properties": {
+                        "title": {"type": "string"},
+                        "canonical_fact": {"type": "string"},
+                        "entity_name": {"type": "string"},
+                        "supporting_claim_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                        "source_excerpt": {"type": "string"},
+                        "derived": {"type": "boolean"},
+                        "scope": {"type": "string"},
+                        "conditions": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                    },
+                },
+            },
+            "coverage": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["complete", "claims", "uncovered_claims"],
+                "properties": {
+                    "complete": {"type": "boolean"},
+                    "claims": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["id", "text", "knowledge_unit_indexes", "disposition"],
+                            "properties": {
+                                "id": {"type": "string"},
+                                "text": {"type": "string"},
+                                "knowledge_unit_indexes": {
+                                    "type": "array",
+                                    "items": {"type": "integer"},
+                                },
+                                "disposition": {
+                                    "type": "string",
+                                    "enum": ["knowledge", "non_knowledge"],
+                                },
+                            },
+                        },
+                    },
+                    "uncovered_claims": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                },
+            },
+        },
+    },
+}
 
 
 def _clean(value: Any, limit: int = 12000) -> str:
@@ -194,6 +268,7 @@ def _structured_knowledge_units(parsed: dict, source: str) -> list[dict] | None:
     if not isinstance(raw_units, list) or not isinstance(raw_claims, list):
         return None
     known_claim_ids = set()
+    claim_texts = {}
     for claim in raw_claims:
         if not isinstance(claim, dict):
             return None
@@ -202,6 +277,7 @@ def _structured_knowledge_units(parsed: dict, source: str) -> list[dict] | None:
         if not claim_id or not claim_text or claim_text not in source or claim_id in known_claim_ids:
             return None
         known_claim_ids.add(claim_id)
+        claim_texts[claim_id] = claim_text
     result = []
     for item in raw_units:
         if not isinstance(item, dict):
@@ -209,27 +285,42 @@ def _structured_knowledge_units(parsed: dict, source: str) -> list[dict] | None:
         content = _clean(item.get("canonical_fact") or item.get("content") or item.get("fact"))
         if not content:
             return None
-        supplied_excerpt = _clean(item.get("source_excerpt"), 12000)
-        if supplied_excerpt and supplied_excerpt in source:
-            source_excerpt = supplied_excerpt
-        else:
-            supporting = item.get("supporting_claims") or item.get("supporting_points") or []
-            if isinstance(supporting, str):
-                supporting = [supporting]
-            if not isinstance(supporting, list):
-                return None
-            source_excerpt = _source_span(source, [str(value) for value in supporting])
-        if not source_excerpt:
-            return None
         supporting_claim_ids = item.get("supporting_claim_ids") or []
         if isinstance(supporting_claim_ids, str):
             supporting_claim_ids = [supporting_claim_ids]
+        normalized_claim_ids = [
+            value.strip() for value in supporting_claim_ids
+            if isinstance(value, str) and value.strip()
+        ] if isinstance(supporting_claim_ids, list) else []
         if (
             not isinstance(supporting_claim_ids, list)
             or not supporting_claim_ids
             or not all(isinstance(value, str) and value.strip() for value in supporting_claim_ids)
-            or not set(supporting_claim_ids).issubset(known_claim_ids)
+            or not set(normalized_claim_ids).issubset(known_claim_ids)
         ):
+            return None
+        # Claim ids are the authoritative provenance boundary.  Prefer their
+        # smallest source span over a model-provided whole-document excerpt;
+        # a Raw Evidence row may contain several unrelated claims.
+        claim_excerpts = [claim_texts[value] for value in normalized_claim_ids]
+        source_excerpt = _source_span(source, claim_excerpts)
+        if not source_excerpt:
+            supplied_excerpt = _clean(item.get("source_excerpt"), 12000)
+            if supplied_excerpt and supplied_excerpt in source:
+                source_excerpt = supplied_excerpt
+            else:
+                supporting = item.get("supporting_claims") or item.get("supporting_points") or []
+                if isinstance(supporting, str):
+                    supporting = [supporting]
+                if not isinstance(supporting, list):
+                    return None
+                source_excerpt = _source_span(source, [str(value) for value in supporting])
+        if not source_excerpt:
+            return None
+        conditions = item.get("conditions") or []
+        if isinstance(conditions, str):
+            conditions = [conditions]
+        if not isinstance(conditions, list):
             return None
         result.append({
             "title": _clean(item.get("title"), 500) or content[:120],
@@ -237,8 +328,10 @@ def _structured_knowledge_units(parsed: dict, source: str) -> list[dict] | None:
             "entity_name": _clean(item.get("entity_name") or item.get("subject"), 500),
             "derived": bool(item.get("derived") or item.get("inferred")),
             "source_excerpt": source_excerpt,
-            "supporting_claim_ids": [value.strip() for value in supporting_claim_ids],
+            "supporting_claim_ids": normalized_claim_ids,
             "supporting_points": [str(value) for value in (item.get("supporting_points") or []) if str(value).strip()],
+            "scope": _clean(item.get("scope"), 2000),
+            "conditions": [_clean(value, 2000) for value in conditions if _clean(value, 2000)],
         })
     return result
 
@@ -284,6 +377,14 @@ def _related_semantic_units(left: dict, right: dict) -> bool:
 
     if not _same_entity(left, right):
         return False
+    left_scope = _clean(left.get("scope"), 2000).casefold()
+    right_scope = _clean(right.get("scope"), 2000).casefold()
+    if left_scope and right_scope and left_scope != right_scope:
+        return False
+    left_conditions = {_clean(value, 2000).casefold() for value in (left.get("conditions") or []) if _clean(value, 2000)}
+    right_conditions = {_clean(value, 2000).casefold() for value in (right.get("conditions") or []) if _clean(value, 2000)}
+    if left_conditions and right_conditions and left_conditions.isdisjoint(right_conditions):
+        return False
     left_tokens = _meaningful_tokens(left.get("content", ""), left.get("entity_name", ""))
     right_tokens = _meaningful_tokens(right.get("content", ""), right.get("entity_name", ""))
     left_numbers = set(re.findall(r"\d+(?:\.\d+)?", left.get("content", "")))
@@ -310,6 +411,11 @@ def _consolidate_related_units(facts: list[dict]) -> list[dict]:
             ))
             previous["supporting_points"] = list(dict.fromkeys(
                 [*previous.get("supporting_points", []), *fact.get("supporting_points", [])]
+            ))
+            if not previous.get("scope"):
+                previous["scope"] = fact.get("scope", "")
+            previous["conditions"] = list(dict.fromkeys(
+                [*previous.get("conditions", []), *fact.get("conditions", [])]
             ))
             previous_excerpt = previous.get("source_excerpt", "")
             current_excerpt = fact.get("source_excerpt", "")
@@ -358,15 +464,6 @@ def _postprocess_semantic_units(facts: list[dict]) -> list[dict]:
     return _consolidate_related_units(expanded)
 
 
-def _fact_needs_russian_normalization(fact: dict) -> bool:
-    """Return whether a new Knowledge proposal contains non-Russian prose."""
-
-    content_language = language(_clean(fact.get("content"), 12000))
-    title = _clean(fact.get("title"), 500)
-    title_language = language(title) if title else "und"
-    return content_language != "ru" or title_language in {"en", "zh"}
-
-
 def _has_russian_prose(value: str) -> bool:
     """Detect Russian prose without misclassifying model/codec tokens."""
 
@@ -386,74 +483,31 @@ def _stable_technical_markers(value: str) -> set[str]:
     return markers
 
 
-def _normalize_facts_to_russian(facts: list[dict], llm_service) -> list[dict] | None:
-    """Translate proposed units in one bounded OpenRouter call.
+def _validate_russian_facts(facts: list[dict]) -> None:
+    """Reject model output that is not already Russian and lossless enough."""
 
-    This is deliberately a proposal-only transformation.  The returned
-    language fields are validated here, while entity/source/provenance fields
-    remain owned by the original extraction result.
-    """
+    for fact in facts:
+        title = _clean(fact.get("title"), 500)
+        content = _clean(fact.get("content"), 12000)
+        if not title or not content or not _has_russian_prose(content):
+            raise ValueError("learning extraction did not return Russian Knowledge")
+        if language(title) not in {"ru", "und"}:
+            raise ValueError("learning extraction did not return a Russian title")
+        if not _stable_technical_markers(content).issuperset(
+            _stable_technical_markers(fact.get("source_excerpt", ""))
+        ):
+            raise ValueError("learning extraction dropped technical markers")
 
-    if not facts:
-        return facts
-    if not any(_fact_needs_russian_normalization(fact) for fact in facts):
-        return facts
-    if llm_service is None or not callable(getattr(llm_service, "extract", None)):
-        log.warning("V2 Russian normalization unavailable; refusing non-Russian Knowledge")
-        return None
 
-    input_units = []
-    for index, fact in enumerate(facts):
-        input_units.append({
-            "index": index,
-            "title": _clean(fact.get("title"), 500),
-            "proposed_fact": _clean(fact.get("content"), 12000),
-            "entity_name": _clean(fact.get("entity_name"), 500),
-            "source_excerpt": _clean(fact.get("source_excerpt"), 12000),
-        })
-    messages = [
-        {"role": "system", "content": RUSSIAN_NORMALIZATION_SYSTEM_PROMPT},
-        {
-            "role": "user",
-            "content": json.dumps({"knowledge_units": input_units}, ensure_ascii=False),
-        },
-    ]
-    try:
-        parsed = parse_json_response(llm_service.extract(messages, max_tokens=1200))
-        units = parsed.get("knowledge_units") if isinstance(parsed, dict) else None
-        if not isinstance(units, list) or len(units) != len(facts):
-            raise ValueError("Russian normalization returned the wrong unit count")
-        by_index = {}
-        for item in units:
-            if not isinstance(item, dict):
-                raise ValueError("Russian normalization returned a non-object unit")
-            index = item.get("index")
-            if not isinstance(index, int) or isinstance(index, bool) or index in by_index:
-                raise ValueError("Russian normalization returned invalid indexes")
-            if index < 0 or index >= len(facts):
-                raise ValueError("Russian normalization returned an out-of-range index")
-            title = _clean(item.get("title"), 500)
-            content = _clean(item.get("canonical_fact"), 12000)
-            if not title or not content or not _has_russian_prose(content):
-                raise ValueError("Russian normalization did not return Russian content")
-            if language(title) not in {"ru", "und"}:
-                raise ValueError("Russian normalization did not return a Russian title")
-            original_content = _clean(facts[index].get("content"), 12000)
-            if not _stable_technical_markers(original_content).issubset(
-                _stable_technical_markers(content)
-            ):
-                raise ValueError("Russian normalization dropped technical markers")
-            by_index[index] = (title, content)
-        if set(by_index) != set(range(len(facts))):
-            raise ValueError("Russian normalization did not cover every unit")
-        result = []
-        for index, fact in enumerate(facts):
-            title, content = by_index[index]
-            result.append(dict(fact, title=title, content=content))
-        return result
-    except Exception:
-        log.exception("V2 Russian normalization failed; refusing non-Russian Knowledge")
-        return None
+def _extract_learning_response(llm_service, messages: list[dict], max_tokens: int) -> str:
+    """Use Learning Structured Outputs when the production client supports it."""
+
+    structured = getattr(llm_service, "extract_structured", None)
+    if callable(structured):
+        return structured(messages, LEARNING_EXTRACTION_SCHEMA, max_tokens=max_tokens)
+    # Compatibility for small test doubles and older internal callers. The
+    # production OpenRouterLLM always takes the structured branch above.
+    return llm_service.extract(messages, max_tokens=max_tokens)
 
 
 def _model_facts(
@@ -491,7 +545,9 @@ def _model_facts(
         })
     messages.append({"role": "user", "content": content})
     try:
-        parsed = parse_json_response(llm_service.extract(messages, max_tokens=extraction_max_tokens))
+        parsed = parse_json_response(
+            _extract_learning_response(llm_service, messages, extraction_max_tokens)
+        )
         if isinstance(parsed, dict) and "knowledge_units" in parsed:
             facts = _structured_knowledge_units(parsed, content)
             if (
@@ -503,23 +559,10 @@ def _model_facts(
                     parsed.get("coverage"),
                 )
             ):
-                log.warning("V2 semantic extraction contract invalid; keeping a provisional raw interpretation")
-                if not _retry_contract:
-                    return _model_facts(
-                        content,
-                        llm_service,
-                        context,
-                        max_tokens=max_tokens,
-                        require_coverage=require_coverage,
-                        normalize_to_russian=normalize_to_russian,
-                        _retry_contract=True,
-                    )
-                return ([], True) if normalize_to_russian else (_fallback_facts(content), True)
+                raise ValueError("V2 semantic extraction contract invalid")
             facts = _postprocess_semantic_units(facts)
             if normalize_to_russian:
-                facts = _normalize_facts_to_russian(facts, llm_service)
-                if facts is None:
-                    return [], True
+                _validate_russian_facts(facts)
             return facts, False
         raw_facts = parsed.get("facts") if isinstance(parsed, dict) else None
         if not isinstance(raw_facts, list):
@@ -561,11 +604,9 @@ def _model_facts(
             # existing multi-fact response would undo its explicit split.
             facts = _postprocess_semantic_units(facts) if len(facts) == 1 else facts
             if normalize_to_russian:
-                facts = _normalize_facts_to_russian(facts, llm_service)
-                if facts is None:
-                    return [], True
+                _validate_russian_facts(facts)
             return facts, False
-    except Exception:
+    except (ValueError, TypeError):
         log.exception("V2 learning understanding failed; keeping a provisional raw interpretation")
         if not _retry_contract:
             return _model_facts(
@@ -577,6 +618,12 @@ def _model_facts(
                 normalize_to_russian=normalize_to_russian,
                 _retry_contract=True,
             )
+    except Exception:
+        # Provider/network/configuration failures are already bounded by the
+        # OpenRouter client. Do not spend a second repair call on an endpoint
+        # that is unavailable; repair is reserved for a local contract or
+        # language-validation failure.
+        log.exception("V2 learning provider failed; keeping a provisional raw interpretation")
     return ([], True) if normalize_to_russian else (_fallback_facts(content), True)
 
 
@@ -873,6 +920,12 @@ def _deduplicate_facts(facts: list[dict]) -> list[dict]:
             "derived": bool(fact.get("derived")),
             "individual_confirmation": bool(fact.get("individual_confirmation")),
             "source_excerpt": _clean(fact.get("source_excerpt"), 12000),
+            "scope": _clean(fact.get("scope"), 2000),
+            "conditions": [
+                _clean(value, 2000)
+                for value in (fact.get("conditions") or [])
+                if _clean(value, 2000)
+            ],
         })
     return result
 
@@ -1076,13 +1129,14 @@ def _confirm(
             SET trust=CASE WHEN trust='official_source'
                            THEN 'official_source'
                            ELSE 'user_confirmed' END,
+                content=COALESCE(NULLIF(%s, ''), content),
                 active=TRUE, updated_at=CURRENT_TIMESTAMP
             WHERE id=%s AND active=TRUE
               AND trust IN ('official_source', 'user_confirmed', 'provisional')
             RETURNING id, title, content, entity_name, trust, active,
                       entity_id, created_at, updated_at
             """,
-            (knowledge_id,),
+            (str(proposal.get("fact_text") or "").strip(), knowledge_id),
         )
         row = cur.fetchone()
     if row is None:
@@ -1457,7 +1511,27 @@ def _batch_detail_message(conn, batch: dict) -> tuple[dict, str]:
         lines.append(f"- 第{item.get('segment_no')}项：{item.get('content')}{suffix}")
     if not (batch.get("clear_facts") or batch.get("unclear_items")):
         lines.append("- 暂无可展示的已提取事实。")
-    message = _insert_message(conn, int(batch["thread_id"]), "assistant", "batch_confirmation", "\n".join(lines))
+    detail_text = "\n".join(lines)
+    # Older clients can still send the legacy "查看明细" command. Reuse the
+    # same rendered message instead of appending an identical conversation
+    # entry on every click.
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, thread_id, sequence_no, role, message_type, content,
+                   raw_evidence_id, created_at
+            FROM v2_inbox_messages
+            WHERE thread_id=%s AND role='assistant'
+              AND message_type='batch_confirmation' AND content=%s
+            ORDER BY id DESC LIMIT 1
+            """,
+            (int(batch["thread_id"]), detail_text),
+        )
+        previous = cur.fetchone()
+    if previous:
+        message = dict(previous)
+    else:
+        message = _insert_message(conn, int(batch["thread_id"]), "assistant", "batch_confirmation", detail_text)
     with conn.cursor() as cur:
         cur.execute(
             "UPDATE v2_learning_batches SET confirmation_message_id=%s, updated_at=CURRENT_TIMESTAMP WHERE id=%s",
