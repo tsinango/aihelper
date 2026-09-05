@@ -241,6 +241,28 @@ class LearningLoopTest(unittest.TestCase):
                 message_id=11,
             )
 
+    def test_skip_refreshes_pending_batch_with_connection(self):
+        pending = {
+            "id": 30,
+            "thread_id": 7,
+            "fact_text": "F-X 支持某功能",
+            "confirmed_knowledge_id": 20,
+        }
+        batch = {"id": 41, "thread_id": 7, "total_segments": 2}
+        self._patch_common(pending)
+        conn = FakeConnection([])
+        with patch("v2.learning._pending_batch", return_value=batch), patch(
+            "v2.learning._refresh_batch_state", return_value=batch
+        ) as refresh, patch("v2.learning._next_question", return_value=(None, None, None)), patch(
+            "v2.learning._summary", return_value=(None, None)
+        ):
+            result = learn_turn(conn, "跳过")
+
+        self.assertEqual(result["status"], "skipped")
+        refresh.assert_called_once()
+        self.assertIs(refresh.call_args.args[0], conn)
+        self.assertEqual(refresh.call_args.args[1], batch)
+
     def test_passive_budget_does_not_cap_direct_inbox_questions(self):
         message = {"id": 40, "thread_id": 7, "content": "question"}
         with patch("v2.learning._session_question_count", return_value=(5, 5)) as count, patch(

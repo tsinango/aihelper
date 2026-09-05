@@ -1603,7 +1603,7 @@ def learn_turn(
             acknowledgement_message = _insert_message(
                 conn, current_thread_id, "assistant", "text", acknowledgement
             )
-            _refresh_batch_state(pending_batch) if pending_batch else None
+            _refresh_batch_state(conn, pending_batch) if pending_batch else None
             _resume_paused_proposals(conn, current_thread_id)
             next_message, _, next_proposal = _next_question(conn, current_thread_id, session)
             if next_message:
