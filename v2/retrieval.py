@@ -38,14 +38,20 @@ def _explicit_model_identifiers(value: Any) -> set[str]:
     return result
 
 
+def _entity_name(row: dict) -> str:
+    """Use the current organization name, with a legacy row fallback."""
+
+    return _text(row.get("entity_name") or row.get("legacy_entity_name"), 500)
+
+
 def _same_model(query: str, row: dict) -> bool:
-    entity = _text(row.get("entity_name"), 500).casefold()
+    entity = _entity_name(row).casefold()
     return bool(entity and (entity in query.casefold() or entity in _models(query)))
 
 
 def _lexical_score(query: str, row: dict) -> float:
     query_tokens = _tokens(query)
-    row_tokens = _tokens(" ".join(_text(row.get(key)) for key in ("title", "content", "entity_name")))
+    row_tokens = _tokens(" ".join((_text(row.get("title")), _text(row.get("content")), _entity_name(row))))
     if not query_tokens or not row_tokens:
         return 0.0
     score = len(query_tokens & row_tokens) / math.sqrt(len(query_tokens) * len(row_tokens))
@@ -72,9 +78,19 @@ def _cosine(left: list[float], right: list[float]) -> float | None:
 def _rows(conn) -> list[dict]:
     with conn.cursor() as cur:
         cur.execute("""
-            SELECT id, title, content, entity_name, trust, active, embedding, embedding_model,
-                   created_at, updated_at
-            FROM v2_knowledge WHERE active=TRUE ORDER BY id
+            SELECT k.id, k.title, k.content, k.entity_id,
+                   COALESCE(e.name, k.entity_name) AS entity_name,
+                   k.entity_name AS legacy_entity_name,
+                   k.trust, k.active, k.embedding, k.embedding_model,
+                   k.created_at, k.updated_at
+            FROM (
+              SELECT id, title, content, entity_id, entity_name, trust, active,
+                     embedding, embedding_model, created_at, updated_at
+              FROM v2_knowledge
+              WHERE active=TRUE
+            ) k
+            LEFT JOIN v2_entities e ON e.id=k.entity_id
+            ORDER BY k.id
         """)
         return [dict(row) for row in cur.fetchall()]
 
@@ -131,7 +147,7 @@ def retrieve_learning_knowledge(conn, query: str, *, embedder=None, top_k: int =
         if query_models:
             rows = [
                 row for row in rows
-                if query_models & _explicit_model_identifiers(row.get("entity_name"))
+                if query_models & _explicit_model_identifiers(_entity_name(row))
             ]
     scored = {}
     for row in rows:

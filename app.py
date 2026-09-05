@@ -56,6 +56,7 @@ from v2.service import (
     list_knowledge_history,
     list_knowledge_sources,
     list_entity_tree,
+    prune_empty_entity_subtree,
     edit_knowledge,
     deactivate_knowledge,
     restore_knowledge,
@@ -2020,6 +2021,20 @@ def v2_entity_tree(x_api_key: str | None = Header(None)):
     auth(x_api_key)
     with db() as conn:
         return json_safe(list_entity_tree(conn))
+
+
+@app.post("/api/v2/entities/{entity_id}/prune")
+def v2_prune_entity(entity_id: int, x_api_key: str | None = Header(None)):
+    """Human-initiated, fail-closed pruning of an empty entity subtree."""
+
+    auth(x_api_key)
+    try:
+        with db() as conn:
+            return json_safe(prune_empty_entity_subtree(conn, int(entity_id)))
+    except V2NotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @app.get("/api/v2/documents")

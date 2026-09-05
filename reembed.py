@@ -77,15 +77,21 @@ def main() -> None:
             )
             document_rows = cur.fetchall()
             knowledge_rows = []
-            for table in ("case_knowledge_memory", "verified_knowledge", "knowledge_learning_examples"):
+            for table in ("case_knowledge_memory", "verified_knowledge", "knowledge_learning_examples", "v2_knowledge"):
                 id_column = "verified_knowledge_id" if table == "verified_knowledge" else "id"
                 condition = "embedding IS NULL OR embedding_status IS DISTINCT FROM 'ready'" if table == "verified_knowledge" else (
                     "embedding IS NULL OR embedding_model IS DISTINCT FROM %s"
                 )
                 parameters = () if table == "verified_knowledge" else (model_name,)
+                searchable_text = (
+                    "concat_ws(' ', NULLIF(entity_name, ''), NULLIF(title, ''), content)"
+                    if table == "v2_knowledge"
+                    else "searchable_text"
+                )
+                active_filter = " AND active=TRUE" if table == "v2_knowledge" else ""
                 cur.execute(
-                    f"SELECT {id_column}, searchable_text FROM {table} "
-                    f"WHERE searchable_text <> '' AND ({condition}) ORDER BY {id_column}",
+                    f"SELECT {id_column}, {searchable_text} AS searchable_text FROM {table} "
+                    f"WHERE {searchable_text} <> '' AND ({condition}){active_filter} ORDER BY {id_column}",
                     parameters,
                 )
                 knowledge_rows.extend((table, row[0], row[1]) for row in cur.fetchall())

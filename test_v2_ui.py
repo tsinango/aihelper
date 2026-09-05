@@ -72,6 +72,9 @@ class V2UiTest(unittest.TestCase):
             "/restore",
             "/sources",
             "/history",
+            "/api/v2/entities/${encodeURIComponent(node.id)}/prune",
+            "删除空分支",
+            "node.prune_allowed",
             "textarea.value=String(item.content||'')",
             "entity_id:select.value",
         ):

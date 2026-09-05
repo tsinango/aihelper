@@ -455,7 +455,7 @@ class BulkIntakeTest(unittest.TestCase):
             require_coverage=True,
         )
         self.assertTrue(fallback)
-        self.assertEqual(facts[0]["content"], "Пакет алгоритмов Guanlan 01; тип: detection; модель: большой; статус: в разработке.")
+        self.assertEqual(facts, [])
 
     def test_segment_coverage_contract_accepts_all_explicit_fields(self):
         source = "Пакет алгоритмов Guanlan 01; тип: detection; модель: большой; статус: в разработке."

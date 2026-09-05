@@ -74,6 +74,10 @@ sudo -u ubuntu /opt/aihelper/.venv/bin/python /opt/aihelper/apply_migration.py \
   --env-file /etc/aihelper.env migrations/017_v2_inbox_worker_heartbeat.sql
 sudo -u ubuntu /opt/aihelper/.venv/bin/python /opt/aihelper/apply_migration.py \
   --env-file /etc/aihelper.env migrations/018_v2_organization.sql
+sudo -u ubuntu /opt/aihelper/.venv/bin/python /opt/aihelper/apply_migration.py \
+  --env-file /etc/aihelper.env migrations/019_v2_knowledge_history.sql
+sudo -u ubuntu /opt/aihelper/.venv/bin/python /opt/aihelper/apply_migration.py \
+  --env-file /etc/aihelper.env migrations/020_v2_entity_pruning.sql
 ```
 
 Install and switch units without allowing both web services to bind port
@@ -135,6 +139,15 @@ Health checks:
 curl http://127.0.0.1:8000/health
 curl http://127.0.0.1:8000/ready
 ```
+
+Knowledge maintenance is human-initiated.  Deleting a Knowledge item is a
+soft delete, so its raw evidence, sources, and Entity remain available for
+audit or restore.  The Knowledge page only offers `删除` for an Entity whose
+entire active subtree has no Knowledge references; both active and deleted
+Knowledge references block pruning.  A prune request is checked again inside
+the database transaction and returns a conflict if the state changed after the
+page was loaded.  Pruning only sets `active=false` and `deactivated_at` on
+Entities and relations; it never physically deletes rows.
 
 PostgreSQL check:
 

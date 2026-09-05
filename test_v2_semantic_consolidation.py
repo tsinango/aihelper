@@ -340,7 +340,7 @@ class SemanticConsolidationTest(unittest.TestCase):
         facts, fallback = _model_facts(source, SemanticExtractor(response))
 
         self.assertTrue(fallback)
-        self.assertEqual(facts[0]["content"], source)
+        self.assertEqual(facts, [])
 
 
 if __name__ == "__main__":

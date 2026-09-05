@@ -126,7 +126,7 @@ class LearningLoopTest(unittest.TestCase):
         common[5].assert_called_once_with(correction_conn, 30, "corrected", message_id=11)
         self.assertEqual(result["status"], "awaiting_confirmation")
 
-    def test_model_output_cannot_grant_trust_and_fallback_is_safe(self):
+    def test_model_output_cannot_grant_trust_and_provider_failure_fails_closed(self):
         llm = FakeLLM('{"facts":[{"title":"事实","content":"设备支持声音阈值检测","entity_name":"F-X","trust":"user_confirmed"}]}')
         facts, fallback = _model_facts("F-X 支持声音阈值检测", llm)
         self.assertFalse(fallback)
@@ -136,7 +136,7 @@ class LearningLoopTest(unittest.TestCase):
 
         facts, fallback = _model_facts("F-X 可能支持声音阈值检测", None)
         self.assertTrue(fallback)
-        self.assertEqual(facts[0]["content"], "F-X 可能支持声音阈值检测")
+        self.assertEqual(facts, [])
 
     def test_confirmation_transition_writes_user_confirmed_and_audit_source(self):
         conn = FakeConnection([{

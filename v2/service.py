@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 from collections import defaultdict
+from contextlib import nullcontext
 from typing import Any
 
 from psycopg.types.json import Jsonb
@@ -561,16 +562,29 @@ def edit_knowledge(
     if not content_changed and not entity_changed:
         return current
     with conn.cursor() as cur:
-        cur.execute(
-            """
-            UPDATE v2_knowledge
-            SET content=%s, entity_id=%s, updated_at=CURRENT_TIMESTAMP
-            WHERE id=%s AND active=TRUE
-            RETURNING id, title, content, entity_name, entity_id, trust, active,
-                      created_at, updated_at
-            """,
-            (clean, entity_id, int(knowledge_id)),
-        )
+        if content_changed:
+            cur.execute(
+                """
+                UPDATE v2_knowledge
+                SET content=%s, entity_id=%s, embedding=NULL, embedding_model=NULL,
+                    updated_at=CURRENT_TIMESTAMP
+                WHERE id=%s AND active=TRUE
+                RETURNING id, title, content, entity_name, entity_id, trust, active,
+                          created_at, updated_at
+                """,
+                (clean, entity_id, int(knowledge_id)),
+            )
+        else:
+            cur.execute(
+                """
+                UPDATE v2_knowledge
+                SET entity_id=%s, updated_at=CURRENT_TIMESTAMP
+                WHERE id=%s AND active=TRUE
+                RETURNING id, title, content, entity_name, entity_id, trust, active,
+                          created_at, updated_at
+                """,
+                (entity_id, int(knowledge_id)),
+            )
         updated = _dict(cur.fetchone())
     if not updated:
         raise V2NotFound(f"active V2 Knowledge {knowledge_id} was not found")
@@ -771,10 +785,12 @@ def list_entity_tree(conn) -> dict:
         cur.execute(
             """
             SELECT e.id, e.name, e.entity_type, e.active,
-                   e.created_at, e.updated_at, count(k.id) AS knowledge_count
+                   e.created_at, e.updated_at,
+                   count(k.id) FILTER (WHERE k.active=TRUE) AS knowledge_count,
+                   count(k.id) AS knowledge_reference_count
             FROM v2_entities e
             LEFT JOIN v2_knowledge k
-              ON k.entity_id=e.id AND k.active=TRUE
+              ON k.entity_id=e.id
             WHERE e.active=TRUE
             GROUP BY e.id
             ORDER BY lower(e.name), e.id
@@ -799,6 +815,7 @@ def list_entity_tree(conn) -> dict:
             "name": entity["name"],
             "entity_type": entity["entity_type"],
             "knowledge_count": int(entity.get("knowledge_count") or 0),
+            "knowledge_reference_count": int(entity.get("knowledge_reference_count") or 0),
             "children": [],
         }
         for entity in entities
@@ -815,15 +832,238 @@ def list_entity_tree(conn) -> dict:
 
     def render(entity_id: int, path: frozenset[int] = frozenset()) -> dict:
         if entity_id in path:
-            return dict(nodes[entity_id], children=[])
+            node = dict(nodes[entity_id], children=[])
+            node["subtree_knowledge_reference_count"] = node["knowledge_reference_count"]
+            node["subtree_entity_count"] = 1
+            node["prune_allowed"] = node["subtree_knowledge_reference_count"] == 0
+            return node
         node = dict(nodes[entity_id])
         node["children"] = [render(child_id, path | {entity_id}) for child_id in children.get(entity_id, [])]
+        node["subtree_knowledge_reference_count"] = node["knowledge_reference_count"] + sum(
+            child["subtree_knowledge_reference_count"] for child in node["children"]
+        )
+        node["subtree_entity_count"] = 1 + sum(
+            child["subtree_entity_count"] for child in node["children"]
+        )
+        node["prune_allowed"] = node["subtree_knowledge_reference_count"] == 0
         return node
 
     root_ids = [entity_id for entity_id in nodes if not parents.get(entity_id)]
     roots = [render(entity_id) for entity_id in root_ids if children.get(entity_id)]
     unorganized = [render(entity_id) for entity_id in root_ids if not children.get(entity_id)]
     return {"roots": roots, "unorganized": unorganized}
+
+
+def _active_entity_subtree(conn, root_entity_id: int) -> list[dict]:
+    """Read an active subtree with path protection against malformed cycles."""
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            WITH RECURSIVE subtree(entity_id, path) AS (
+              SELECT %s::BIGINT, ARRAY[%s::BIGINT]
+              UNION ALL
+              SELECT r.child_entity_id, s.path || r.child_entity_id
+              FROM subtree s
+              JOIN v2_entity_relations r
+                ON r.parent_entity_id=s.entity_id
+               AND r.relation_type='belongs_to'
+               AND r.active=TRUE
+              JOIN v2_entities child
+                ON child.id=r.child_entity_id AND child.active=TRUE
+              WHERE NOT r.child_entity_id = ANY(s.path)
+            )
+            SELECT DISTINCT e.id, e.name, e.entity_type, e.active,
+                            e.created_at, e.updated_at
+            FROM subtree s
+            JOIN v2_entities e ON e.id=s.entity_id AND e.active=TRUE
+            ORDER BY e.id
+            """,
+            (int(root_entity_id), int(root_entity_id)),
+        )
+        return [_dict(row) for row in cur.fetchall()]
+
+
+def _lock_active_entities(conn, entity_ids: list[int]) -> list[dict]:
+    if not entity_ids:
+        return []
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, name, entity_type, active, created_at, updated_at
+            FROM v2_entities
+            WHERE id=ANY(%s) AND active=TRUE
+            ORDER BY id
+            FOR UPDATE
+            """,
+            (entity_ids,),
+        )
+        return [_dict(row) for row in cur.fetchall()]
+
+
+def _lock_touching_relations(conn, entity_ids: list[int]) -> list[dict]:
+    if not entity_ids:
+        return []
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, parent_entity_id, child_entity_id, relation_type,
+                   source_id, provenance, provenance_kind, active,
+                   created_at, updated_at
+            FROM v2_entity_relations
+            WHERE active=TRUE
+              AND (parent_entity_id=ANY(%s) OR child_entity_id=ANY(%s))
+            ORDER BY id
+            FOR UPDATE
+            """,
+            (entity_ids, entity_ids),
+        )
+        return [_dict(row) for row in cur.fetchall()]
+
+
+def _lock_knowledge_references(conn, entity_ids: list[int]) -> list[dict]:
+    if not entity_ids:
+        return []
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, entity_id, active, trust
+            FROM v2_knowledge
+            WHERE entity_id=ANY(%s)
+            ORDER BY id
+            FOR UPDATE
+            """,
+            (entity_ids,),
+        )
+        return [_dict(row) for row in cur.fetchall()]
+
+
+def _contains_active_cycle(entity_ids: list[int], relations: list[dict]) -> bool:
+    """Reject malformed active cycles instead of treating them as a tree."""
+
+    allowed = set(entity_ids)
+    children: dict[int, list[int]] = defaultdict(list)
+    for relation in relations:
+        parent_id = int(relation["parent_entity_id"])
+        child_id = int(relation["child_entity_id"])
+        if parent_id in allowed and child_id in allowed:
+            children[parent_id].append(child_id)
+
+    visiting: set[int] = set()
+    visited: set[int] = set()
+
+    def visit(entity_id: int) -> bool:
+        if entity_id in visiting:
+            return True
+        if entity_id in visited:
+            return False
+        visiting.add(entity_id)
+        if any(visit(child_id) for child_id in children.get(entity_id, [])):
+            return True
+        visiting.remove(entity_id)
+        visited.add(entity_id)
+        return False
+
+    return any(visit(entity_id) for entity_id in entity_ids)
+
+
+def prune_empty_entity_subtree(conn, entity_id: int) -> dict:
+    """Human-initiated soft-prune of an entirely empty active entity subtree.
+
+    This helper is intentionally not called by learning or organization
+    review. It locks and re-checks the current database state in one
+    transaction. Any Knowledge reference blocks the whole operation, including
+    inactive Knowledge that may later be restored. Entities and relations are
+    only deactivated.
+    """
+
+    root_id = int(entity_id)
+    transaction = (
+        conn.transaction()
+        if callable(getattr(conn, "transaction", None))
+        else nullcontext()
+    )
+    with transaction:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, name, entity_type, active, created_at, updated_at
+                FROM v2_entities
+                WHERE id=%s
+                FOR UPDATE
+                """,
+                (root_id,),
+            )
+            root = _dict(cur.fetchone()) or None
+        if root is None:
+            raise V2NotFound(f"V2 entity {root_id} was not found")
+        if not root.get("active"):
+            raise ValueError("entity structure is already inactive")
+
+        # Refresh after locking the discovered rows.  The bounded second pass
+        # keeps the operation local while avoiding a stale first traversal.
+        subtree: list[dict] = []
+        relations: list[dict] = []
+        for _ in range(2):
+            subtree = _active_entity_subtree(conn, root_id)
+            entity_ids = sorted({int(row["id"]) for row in subtree})
+            if root_id not in entity_ids:
+                raise ValueError("entity structure is no longer active")
+            _lock_active_entities(conn, entity_ids)
+            relations = _lock_touching_relations(conn, entity_ids)
+            refreshed_ids = sorted({int(row["id"]) for row in _active_entity_subtree(conn, root_id)})
+            if refreshed_ids == entity_ids:
+                break
+
+        entity_ids = sorted({int(row["id"]) for row in subtree})
+        knowledge = _lock_knowledge_references(conn, entity_ids)
+        knowledge_ids = [int(row["id"]) for row in knowledge]
+        if _contains_active_cycle(entity_ids, relations):
+            raise ValueError("cannot prune malformed entity structure with an active cycle")
+        if knowledge:
+            raise ValueError(
+                "cannot prune entity structure with active or deleted Knowledge references"
+            )
+
+        relation_ids = [int(row["id"]) for row in relations]
+        deactivated_relation_ids: list[int] = []
+        if relation_ids:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE v2_entity_relations
+                    SET active=FALSE, deactivated_at=COALESCE(deactivated_at, CURRENT_TIMESTAMP),
+                        updated_at=CURRENT_TIMESTAMP
+                    WHERE id=ANY(%s) AND active=TRUE
+                    RETURNING id
+                    """,
+                    (relation_ids,),
+                )
+                deactivated_relation_ids = [int(row["id"]) for row in cur.fetchall()]
+
+        deactivated_entity_ids: list[int] = []
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE v2_entities
+                SET active=FALSE, deactivated_at=COALESCE(deactivated_at, CURRENT_TIMESTAMP),
+                    updated_at=CURRENT_TIMESTAMP
+                WHERE id=ANY(%s) AND active=TRUE
+                RETURNING id
+                """,
+                (entity_ids,),
+            )
+            deactivated_entity_ids = [int(row["id"]) for row in cur.fetchall()]
+
+        return {
+            "pruned": True,
+            "reason": "empty_subtree",
+            "entity_id": root_id,
+            "entity_ids": deactivated_entity_ids,
+            "relation_ids": deactivated_relation_ids,
+            "knowledge_ids": knowledge_ids,
+            "active_knowledge_ids": [],
+        }
 
 
 def list_documents(conn, *, limit: int = 100) -> list[dict]:

@@ -235,14 +235,6 @@ def _entity_name(text: str) -> str:
     return match.group(0).upper() if match else ""
 
 
-def _fallback_facts(content: str) -> list[dict]:
-    return [{
-        "title": "待确认的产品信息",
-        "content": content,
-        "entity_name": _entity_name(content),
-    }]
-
-
 def _source_span(source: str, excerpts: list[str]) -> str:
     """Return the smallest source substring covering valid supporting quotes."""
 
@@ -521,7 +513,7 @@ def _model_facts(
     _retry_contract: bool = False,
 ) -> tuple[list[dict], bool]:
     if llm_service is None:
-        return ([], True) if normalize_to_russian else (_fallback_facts(content), True)
+        return [], True
     extraction_max_tokens = max(max_tokens, 2400) if normalize_to_russian else max_tokens
     messages = [{"role": "system", "content": UNDERSTANDING_SYSTEM_PROMPT}]
     if context:
@@ -598,7 +590,7 @@ def _model_facts(
                         normalize_to_russian=normalize_to_russian,
                         _retry_contract=True,
                     )
-                return ([], True) if normalize_to_russian else (_fallback_facts(content), True)
+                return [], True
             # Legacy ``facts`` responses already carry the model's intended
             # unit boundaries.  Only repair a single legacy unit; merging an
             # existing multi-fact response would undo its explicit split.
@@ -607,7 +599,7 @@ def _model_facts(
                 _validate_russian_facts(facts)
             return facts, False
     except (ValueError, TypeError):
-        log.exception("V2 learning understanding failed; keeping a provisional raw interpretation")
+        log.exception("V2 learning understanding failed; retaining Raw Evidence without Knowledge")
         if not _retry_contract:
             return _model_facts(
                 content,
@@ -623,8 +615,8 @@ def _model_facts(
         # OpenRouter client. Do not spend a second repair call on an endpoint
         # that is unavailable; repair is reserved for a local contract or
         # language-validation failure.
-        log.exception("V2 learning provider failed; keeping a provisional raw interpretation")
-    return ([], True) if normalize_to_russian else (_fallback_facts(content), True)
+        log.exception("V2 learning provider failed; retaining Raw Evidence without Knowledge")
+    return [], True
 
 
 def _insert_evidence(
@@ -2137,7 +2129,7 @@ def learn_turn(
             normalize_to_russian=normalize_to_russian,
         )
         facts = _deduplicate_facts(facts)
-        if pending:
+        if pending and facts:
             if pending_status == "pending_confirmation":
                 _retire_corrected_knowledge(conn, pending)
                 finished_status = "corrected"

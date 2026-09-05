@@ -72,6 +72,7 @@ class KnowledgeMaintenanceTest(unittest.TestCase):
         self.assertEqual(result["content"], "new text")
         statements = [query for query, _ in conn.executed]
         self.assertTrue(any(query.startswith("UPDATE v2_knowledge") for query in statements))
+        self.assertTrue(any("embedding=NULL" in query and "embedding_model=NULL" in query for query in statements))
         self.assertEqual(sum("INSERT INTO v2_knowledge_history" in query for query in statements), 2)
         self.assertEqual(sum("v2_knowledge_sources" in query for query in statements), 0)
         actions = [params[1] for query, params in conn.executed if "INSERT INTO v2_knowledge_history" in query]
