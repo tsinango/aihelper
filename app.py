@@ -53,7 +53,12 @@ from v2.service import (
     list_editable_proposals,
     list_knowledge,
     list_knowledge_for_entity,
+    list_knowledge_history,
+    list_knowledge_sources,
     list_entity_tree,
+    edit_knowledge,
+    deactivate_knowledge,
+    restore_knowledge,
     edit_pending_proposal,
     reject_pending_proposal,
     thread_response,
@@ -926,12 +931,14 @@ def ready():
                        to_regclass('public.v2_inbox_processing_jobs') AS jobs,
                        to_regclass('public.v2_inbox_workers') AS workers,
                        to_regclass('public.v2_entities') AS entities,
-                       to_regclass('public.v2_entity_relations') AS entity_relations
+                       to_regclass('public.v2_entity_relations') AS entity_relations,
+                       to_regclass('public.v2_knowledge_history') AS knowledge_history
                 """
             )
             schema = cur.fetchone()
             if not schema or not all(schema.get(name) for name in (
                 "questions", "v2_knowledge", "jobs", "workers", "entities", "entity_relations",
+                "knowledge_history",
             )):
                 return _ready_failure("schema_unavailable")
             worker = worker_health(conn)
@@ -1885,13 +1892,90 @@ def v2_inbox_thread(thread_id: int, x_api_key: str | None = Header(None)):
 @app.get("/api/v2/knowledge")
 def v2_knowledge(
     entity_id: int | None = Query(default=None, gt=0),
+    active: bool = Query(default=True),
+    q: str = Query(default="", max_length=200),
     x_api_key: str | None = Header(None),
 ):
     auth(x_api_key)
     with db() as conn:
-        items = list_knowledge_for_entity(conn, entity_id) if entity_id is not None else list_knowledge(conn)
+        items = (
+            list_knowledge_for_entity(conn, entity_id, active=active, search=q)
+            if entity_id is not None
+            else list_knowledge(conn, active=active, search=q)
+        )
         tree = list_entity_tree(conn)
-    return json_safe({"items": items, "total": len(items), "tree": tree})
+    return json_safe({"items": items, "total": len(items), "tree": tree, "active": active})
+
+
+@app.patch("/api/v2/knowledge/{knowledge_id}")
+def v2_edit_knowledge(
+    knowledge_id: int,
+    body: dict = Body(...),
+    x_api_key: str | None = Header(None),
+):
+    auth(x_api_key)
+    content = str(body.get("content") or "").strip()
+    if not content or len(content) > 12000:
+        raise HTTPException(400, "Knowledge content must contain 1-12000 characters")
+    raw_entity_id = body.get("entity_id")
+    if raw_entity_id in (None, ""):
+        entity_id = None
+    else:
+        try:
+            entity_id = int(raw_entity_id)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(400, "entity_id must be an integer or null") from exc
+        if entity_id <= 0:
+            raise HTTPException(400, "entity_id must be a positive integer or null")
+    try:
+        with db() as conn:
+            return json_safe(edit_knowledge(conn, int(knowledge_id), content, entity_id))
+    except V2NotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.delete("/api/v2/knowledge/{knowledge_id}")
+def v2_delete_knowledge(knowledge_id: int, x_api_key: str | None = Header(None)):
+    auth(x_api_key)
+    try:
+        with db() as conn:
+            return json_safe(deactivate_knowledge(conn, int(knowledge_id)))
+    except V2NotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.post("/api/v2/knowledge/{knowledge_id}/restore")
+def v2_restore_knowledge(knowledge_id: int, x_api_key: str | None = Header(None)):
+    auth(x_api_key)
+    try:
+        with db() as conn:
+            return json_safe(restore_knowledge(conn, int(knowledge_id)))
+    except V2NotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.get("/api/v2/knowledge/{knowledge_id}/sources")
+def v2_knowledge_sources(knowledge_id: int, x_api_key: str | None = Header(None)):
+    auth(x_api_key)
+    try:
+        with db() as conn:
+            return json_safe({"items": list_knowledge_sources(conn, int(knowledge_id))})
+    except V2NotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.get("/api/v2/knowledge/{knowledge_id}/history")
+def v2_knowledge_history(knowledge_id: int, x_api_key: str | None = Header(None)):
+    auth(x_api_key)
+    try:
+        with db() as conn:
+            return json_safe({"items": list_knowledge_history(conn, int(knowledge_id))})
+    except V2NotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
 
 
 @app.get("/api/v2/inbox/threads/{thread_id}/proposals")

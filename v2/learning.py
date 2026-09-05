@@ -1129,7 +1129,17 @@ def _confirm(
             SET trust=CASE WHEN trust='official_source'
                            THEN 'official_source'
                            ELSE 'user_confirmed' END,
-                content=COALESCE(NULLIF(%s, ''), content),
+                -- A human edit is authoritative.  A later automatic learning
+                -- confirmation may confirm its source, but must not silently
+                -- replace the edited text.
+                content=CASE WHEN EXISTS (
+                           SELECT 1 FROM v2_knowledge_history h
+                           WHERE h.knowledge_id=v2_knowledge.id
+                             AND h.action='edit'
+                         )
+                         THEN v2_knowledge.content
+                         ELSE COALESCE(NULLIF(%s, ''), v2_knowledge.content)
+                    END,
                 active=TRUE, updated_at=CURRENT_TIMESTAMP
             WHERE id=%s AND active=TRUE
               AND trust IN ('official_source', 'user_confirmed', 'provisional')

@@ -62,6 +62,21 @@ class V2UiTest(unittest.TestCase):
             self.assertIn("请先在设置中保存 API Key", content, page)
             self.assertNotIn('<label class="keybox"', content, page)
 
+    def test_knowledge_page_has_maintenance_lite_controls(self):
+        content = (ROOT / "templates" / "knowledge.html").read_text()
+        for label in ("Active", "Deleted", "编辑", "删除", "恢复", "来源", "历史", "归属 Entity"):
+            self.assertIn(label, content)
+        for contract in (
+            "method:'PATCH'",
+            "method:'DELETE'",
+            "/restore",
+            "/sources",
+            "/history",
+            "textarea.value=String(item.content||'')",
+            "entity_id:select.value",
+        ):
+            self.assertIn(contract, content, contract)
+
     def test_inbox_chat_reliability_contract(self):
         content = (ROOT / "templates" / "inbox.html").read_text()
         self.assertIn("cache: CACHE_MODE", content)

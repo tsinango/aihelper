@@ -11,6 +11,8 @@ import os
 from collections import defaultdict
 from typing import Any
 
+from psycopg.types.json import Jsonb
+
 
 class V2NotFound(LookupError):
     """Raised when a requested V2 thread does not exist."""
@@ -407,42 +409,263 @@ def inbox_snapshot(conn) -> dict:
     }
 
 
-def list_knowledge(conn, *, limit: int = 100) -> list[dict]:
+def _knowledge_query_filters(*, active: bool, entity_id: int | None, search: str) -> tuple[str, list[Any]]:
+    clauses = ["k.active=%s"]
+    params: list[Any] = [bool(active)]
+    if entity_id is not None:
+        clauses.append("k.entity_id=%s")
+        params.append(int(entity_id))
+    clean_search = str(search or "").strip()
+    if clean_search:
+        clauses.append(
+            "(k.content ILIKE %s OR k.title ILIKE %s "
+            "OR k.entity_name ILIKE %s OR COALESCE(e.name, '') ILIKE %s)"
+        )
+        pattern = f"%{clean_search}%"
+        params.extend([pattern, pattern, pattern, pattern])
+    return " AND ".join(clauses), params
+
+
+def _list_knowledge(
+    conn,
+    *,
+    limit: int = 100,
+    active: bool = True,
+    entity_id: int | None = None,
+    search: str = "",
+) -> list[dict]:
+    where, params = _knowledge_query_filters(active=active, entity_id=entity_id, search=search)
     with conn.cursor() as cur:
         cur.execute(
-            """
-            SELECT k.id, k.title, k.content, k.entity_name, k.entity_id, k.trust,
+            f"""
+            SELECT k.id, k.title, k.content, k.entity_name, k.entity_id,
+                   e.name AS entity_display_name, k.trust,
                    k.active, k.created_at, k.updated_at,
                    count(s.raw_evidence_id) AS source_count
             FROM v2_knowledge k
+            LEFT JOIN v2_entities e ON e.id=k.entity_id
             LEFT JOIN v2_knowledge_sources s ON s.knowledge_id=k.id
-            WHERE k.active=TRUE
-            GROUP BY k.id
+            WHERE {where}
+            GROUP BY k.id, e.name
             ORDER BY k.updated_at DESC, k.id DESC
             LIMIT %s
             """,
-            (limit,),
+            tuple(params + [max(1, int(limit))]),
         )
         return [_dict(row) for row in cur.fetchall()]
 
 
-def list_knowledge_for_entity(conn, entity_id: int, *, limit: int = 100) -> list[dict]:
-    """Return facts linked to one entity without changing the fact layer."""
+def list_knowledge(
+    conn,
+    *,
+    limit: int = 100,
+    active: bool = True,
+    search: str = "",
+) -> list[dict]:
+    return _list_knowledge(conn, limit=limit, active=active, search=search)
 
+
+def list_knowledge_for_entity(
+    conn,
+    entity_id: int,
+    *,
+    limit: int = 100,
+    active: bool = True,
+    search: str = "",
+) -> list[dict]:
+    """Return facts linked to one entity without changing the fact layer."""
+    return _list_knowledge(
+        conn,
+        limit=limit,
+        active=active,
+        entity_id=entity_id,
+        search=search,
+    )
+
+
+def _knowledge_snapshot(row: dict) -> dict:
+    return {
+        "content": str(row.get("content") or ""),
+        "entity_id": row.get("entity_id"),
+        "active": bool(row.get("active")),
+    }
+
+
+def _write_knowledge_history(
+    conn,
+    knowledge_id: int,
+    action: str,
+    before: dict,
+    after: dict,
+) -> None:
+    if action not in {"edit", "deactivate", "restore", "move"}:
+        raise ValueError(f"unknown Knowledge history action: {action}")
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT k.id, k.title, k.content, k.entity_name, k.entity_id, k.trust,
-                   k.active, k.created_at, k.updated_at,
-                   count(s.raw_evidence_id) AS source_count
-            FROM v2_knowledge k
-            LEFT JOIN v2_knowledge_sources s ON s.knowledge_id=k.id
-            WHERE k.active=TRUE AND k.entity_id=%s
-            GROUP BY k.id
-            ORDER BY k.updated_at DESC, k.id DESC
-            LIMIT %s
+            INSERT INTO v2_knowledge_history(
+                knowledge_id, action, before_json, after_json
+            ) VALUES(%s, %s, %s, %s)
             """,
-            (int(entity_id), limit),
+            (int(knowledge_id), action, Jsonb(before), Jsonb(after)),
+        )
+
+
+def _load_knowledge_for_maintenance(conn, knowledge_id: int) -> dict:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, title, content, entity_name, entity_id, trust, active,
+                   created_at, updated_at
+            FROM v2_knowledge
+            WHERE id=%s
+            """,
+            (int(knowledge_id),),
+        )
+        row = cur.fetchone()
+    if not row:
+        raise V2NotFound(f"V2 Knowledge {knowledge_id} was not found")
+    return _dict(row)
+
+
+def _validate_entity_for_maintenance(conn, entity_id: int | None) -> None:
+    if entity_id is None:
+        return
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id FROM v2_entities WHERE id=%s AND active=TRUE",
+            (int(entity_id),),
+        )
+        if cur.fetchone() is None:
+            raise V2NotFound(f"active V2 entity {entity_id} was not found")
+
+
+def edit_knowledge(
+    conn,
+    knowledge_id: int,
+    content: str,
+    entity_id: int | None,
+) -> dict:
+    """Deterministically edit one Knowledge row; no LLM or embedding call."""
+
+    clean = str(content or "").strip()
+    if not clean or len(clean) > 12000:
+        raise ValueError("Knowledge content must contain 1-12000 characters")
+    current = _load_knowledge_for_maintenance(conn, int(knowledge_id))
+    if not current.get("active"):
+        raise ValueError("deleted Knowledge must be restored before editing")
+    _validate_entity_for_maintenance(conn, entity_id)
+    old_snapshot = _knowledge_snapshot(current)
+    content_changed = clean != old_snapshot["content"]
+    entity_changed = entity_id != old_snapshot["entity_id"]
+    if not content_changed and not entity_changed:
+        return current
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE v2_knowledge
+            SET content=%s, entity_id=%s, updated_at=CURRENT_TIMESTAMP
+            WHERE id=%s AND active=TRUE
+            RETURNING id, title, content, entity_name, entity_id, trust, active,
+                      created_at, updated_at
+            """,
+            (clean, entity_id, int(knowledge_id)),
+        )
+        updated = _dict(cur.fetchone())
+    if not updated:
+        raise V2NotFound(f"active V2 Knowledge {knowledge_id} was not found")
+    if content_changed:
+        after = _knowledge_snapshot(updated)
+        after["entity_id"] = old_snapshot["entity_id"]
+        _write_knowledge_history(conn, int(knowledge_id), "edit", old_snapshot, after)
+    if entity_changed:
+        before = _knowledge_snapshot(updated)
+        before["entity_id"] = old_snapshot["entity_id"]
+        after = _knowledge_snapshot(updated)
+        _write_knowledge_history(conn, int(knowledge_id), "move", before, after)
+    return updated
+
+
+def deactivate_knowledge(conn, knowledge_id: int) -> dict:
+    current = _load_knowledge_for_maintenance(conn, int(knowledge_id))
+    if not current.get("active"):
+        return current
+    before = _knowledge_snapshot(current)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE v2_knowledge
+            SET active=FALSE, updated_at=CURRENT_TIMESTAMP
+            WHERE id=%s AND active=TRUE
+            RETURNING id, title, content, entity_name, entity_id, trust, active,
+                      created_at, updated_at
+            """,
+            (int(knowledge_id),),
+        )
+        updated = _dict(cur.fetchone())
+    if not updated:
+        raise V2NotFound(f"active V2 Knowledge {knowledge_id} was not found")
+    _write_knowledge_history(conn, int(knowledge_id), "deactivate", before, _knowledge_snapshot(updated))
+    return updated
+
+
+def restore_knowledge(conn, knowledge_id: int) -> dict:
+    current = _load_knowledge_for_maintenance(conn, int(knowledge_id))
+    if current.get("active"):
+        return current
+    if current.get("trust") == "conflicted":
+        raise ValueError("conflicted Knowledge must be resolved before restoration")
+    before = _knowledge_snapshot(current)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE v2_knowledge
+            SET active=TRUE, updated_at=CURRENT_TIMESTAMP
+            WHERE id=%s AND active=FALSE
+              AND trust IN ('official_source', 'user_confirmed', 'provisional')
+            RETURNING id, title, content, entity_name, entity_id, trust, active,
+                      created_at, updated_at
+            """,
+            (int(knowledge_id),),
+        )
+        updated = _dict(cur.fetchone())
+    if not updated:
+        raise ValueError("Knowledge cannot be restored")
+    _write_knowledge_history(conn, int(knowledge_id), "restore", before, _knowledge_snapshot(updated))
+    return updated
+
+
+def list_knowledge_sources(conn, knowledge_id: int) -> list[dict]:
+    _load_knowledge_for_maintenance(conn, int(knowledge_id))
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT s.id, s.knowledge_id, s.raw_evidence_id, s.source_kind,
+                   s.relation, s.source_role, s.excerpt, s.active, s.resolution,
+                   s.created_at, r.evidence_type, r.source_label,
+                   r.source_locator, r.content AS raw_content,
+                   r.evidence_status
+            FROM v2_knowledge_sources s
+            JOIN v2_raw_evidence r ON r.id=s.raw_evidence_id
+            WHERE s.knowledge_id=%s
+            ORDER BY s.id
+            """,
+            (int(knowledge_id),),
+        )
+        return [_dict(row) for row in cur.fetchall()]
+
+
+def list_knowledge_history(conn, knowledge_id: int) -> list[dict]:
+    _load_knowledge_for_maintenance(conn, int(knowledge_id))
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, knowledge_id, action, before_json, after_json, created_at
+            FROM v2_knowledge_history
+            WHERE knowledge_id=%s
+            ORDER BY created_at DESC, id DESC
+            """,
+            (int(knowledge_id),),
         )
         return [_dict(row) for row in cur.fetchall()]
 
