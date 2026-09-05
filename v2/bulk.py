@@ -126,8 +126,6 @@ def _sentence_segments(text: str, *, max_chars: int = 3600) -> list[str]:
     sentences = [part.strip() for part in _SENTENCE_END.split(text) if part.strip()]
     if not sentences:
         return [text.strip()] if text.strip() else []
-    if all(len(sentence) <= max_chars for sentence in sentences):
-        return sentences
     result: list[str] = []
     current: list[str] = []
     current_size = 0
@@ -224,10 +222,10 @@ def extraction_coverage_is_complete(
 
     A model response is not considered processed merely because it contains a
     fact.  It must explicitly enumerate covered source claims, attach each
-    claim to exactly one extracted fact, preserve a source excerpt, and say
-    that there are no uncovered claims.  The structural lower bound catches
-    the common failure where a multi-field segment returns its first fact and
-    incorrectly claims completion.
+    claim to one or more semantic knowledge units (or mark it non-knowledge),
+    preserve source excerpts, and say that there are no uncovered claims.  A
+    structural lower bound catches the common failure where a multi-field
+    segment returns only its first claim and incorrectly claims completion.
     """
 
     if not isinstance(coverage_data, Mapping):
@@ -242,8 +240,6 @@ def extraction_coverage_is_complete(
         return False
 
     facts = [dict(item) for item in raw_facts if isinstance(item, Mapping)]
-    if not facts or len(facts) < len(claims):
-        return False
     source_text = str(source or "")
     excerpts = []
     for fact in facts:
@@ -257,18 +253,33 @@ def extraction_coverage_is_complete(
         if not isinstance(claim, Mapping):
             return False
         claim_text = str(claim.get("text") or claim.get("source_excerpt") or "").strip()
-        indexes = claim.get("fact_indexes")
+        indexes = claim.get("knowledge_unit_indexes")
+        if indexes is None:
+            indexes = claim.get("fact_indexes")
+        disposition = str(claim.get("disposition") or "knowledge").strip().casefold()
         if not claim_text or claim_text not in source_text:
             return False
-        if not isinstance(indexes, list) or len(indexes) != 1:
+        if indexes == [] and disposition in {"non_knowledge", "marketing", "context"}:
+            continue
+        if not isinstance(indexes, list) or not indexes:
             return False
-        index = indexes[0]
-        if not isinstance(index, int) or isinstance(index, bool) or not 0 <= index < len(facts):
+        if not all(
+            isinstance(index, int) and not isinstance(index, bool) and 0 <= index < len(facts)
+            for index in indexes
+        ):
             return False
-        if claim_text not in excerpts[index]:
+        if not any(claim_text in excerpts[index] for index in indexes):
             return False
-        seen_fact_indexes.add(index)
-    return len(seen_fact_indexes) >= minimum_explicit_claims(source)
+        seen_fact_indexes.update(indexes)
+    if not facts:
+        return all(
+            isinstance(claim.get("knowledge_unit_indexes"), list)
+            and not claim.get("knowledge_unit_indexes")
+            and str(claim.get("disposition") or "").strip().casefold()
+            in {"non_knowledge", "marketing", "context"}
+            for claim in claims
+        )
+    return seen_fact_indexes == set(range(len(facts))) and len(claims) >= minimum_explicit_claims(source)
 
 
 def deduplicate_knowledge(items: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:

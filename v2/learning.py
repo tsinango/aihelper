@@ -55,24 +55,43 @@ _BINARY_QUESTION_MARKERS = (
 
 UNDERSTANDING_SYSTEM_PROMPT = """
 你是一个产品知识学习助理。你正在和产品专家聊天，不是在维护数据库。
-从用户刚刚提供的文字中完整提炼所有原子事实，返回严格 JSON：
-{"facts":[{"title":"简短标题","content":"一个可独立确认的事实","entity_name":"明确型号或产品名，没有就空字符串","derived":false,"source_excerpt":"对应的连续原文片段"}],"coverage":{"complete":true,"claims":[{"text":"连续原文中的一个明确主张","fact_indexes":[0]}],"uncovered_claims":[]}}
+请从用户刚刚提供的原文中先识别 evidence claims，再把语义上属于同一个产品知识的 claims 归并为 knowledge_units，返回严格 JSON：
+{
+  "claims":[{"id":"c1","text":"原文中的连续明确主张"}],
+  "knowledge_units":[{
+    "title":"简短标题",
+    "canonical_fact":"保守、规范化后的一条可引用知识",
+    "entity_name":"明确型号或产品名，没有就空字符串",
+    "supporting_claim_ids":["c1"],
+    "source_excerpt":"覆盖支持 claims 的连续原文片段",
+    "derived":false
+  }],
+  "coverage":{
+    "complete":true,
+    "claims":[{"id":"c1","text":"原文中的连续明确主张","knowledge_unit_indexes":[0],"disposition":"knowledge"}],
+    "uncovered_claims":[]
+  }
+}
+
+重要概念：evidence claim 是为了忠实记录原文和 provenance 的支持点；knowledge_unit 才是进入知识库、供用户确认的语义知识。多个 claims 可以支持同一个 knowledge_unit。不要把“一个 claim”或“一个句子”机械当成一个 knowledge_unit。
 
 硬规则：
-- 每个 facts 项只能包含一个事实；型号、系列范围、hardware revision、firmware、条件、例外和否定事实必须拆成不同项。
-- 不要把单型号推广到系列，不要推断用户没有写出的范围。
+- 先完整识别原文中的 claims，但允许多个同义复述、同一能力的解释/直接效果、连续描述同一 feature 的 claims 归并为一个 knowledge_unit。
+- canonical_fact 必须是保守的规范化表达：可删除营销废话、合并同义内容、明确 subject，但不得加入原文没有的信息，不得扩大产品范围，不得丢失条件、版本、地区、firmware、hardware revision、例外或否定边界。
+- 只有不同型号、不同独立参数、不同条件/版本/地区，或明确矛盾的事实才必须拆成不同 knowledge_units。一个句子可能有多个 units，多句话也可能只有一个 unit。
+- 能力与其直接解释或结果可以合并。例如“保持全景同时查看局部细节”与“减少变焦/云台导致的盲区”通常是同一技术能力的一个 knowledge_unit；不要为了句号数量拆分。
+- 营销性结论（例如“提升安全性”“优秀用户体验”）如果没有独立可验证的产品事实，可作为 claim 记录，但应将 disposition 设为 non_knowledge，不要单独创建 knowledge_unit。
+- source_excerpt 必须是输入中的连续原文片段，并覆盖该 unit 的支持 claims；不要伪造引用。supporting_claim_ids 必须引用 claims 中的 id。
+- 不要把单型号推广到系列，不要根据型号命名或行业常识推断范围。
 - 手册或文字没有提到某功能，不等于不支持；只有明确写出不支持或用户明确确认，才可表达否定。
 - “大概”“可能”“应该”等不确定说法仍然只能作为待确认理解。
 - 原文中的“等 / etc. / и т.д.”表示当前列举非穷尽；保留这个含义，不要要求补齐列表。
 - 只提取原文明确表达的事实。不要为了“补完整”而询问数据规模、RAG、蒸馏、其他模型或任何原文没有提出的维度。
-- 必须处理输入中的每一个逻辑段和每一个编号条目；不要因为事实很多而省略、合并或截断。
+- 必须处理输入中的每一个逻辑段和每一个编号条目；不要因为事实很多而省略、截断或静默丢弃。可以把同一主题的 claims 合并，但 coverage 必须将每个 claim 映射到一个或多个 knowledge_unit，或明确标记为 non_knowledge。
 - 如果输入是编号列表，保留每一项的名称、类型、模型大小/类型、状态和条件（若原文有写）。
-- derived 只有在你确实做了原文之外的推断时才为 true；原文的忠实拆分或改写必须为 false。
+- derived 只有在你确实做了原文之外的推断时才为 true；原文的忠实归并或改写必须为 false。
 - 不要回答客户问题，不要使用训练知识，不要询问数据库字段或技术实现。
 - 只返回 JSON，不要 markdown，不要解释。
-- bulk 分段提取时，coverage 必须逐个列出所有明确主张；每个主张只能关联一个 fact，
-  每个 fact 都必须保留对应的连续原文 source_excerpt。无法覆盖全部主张时，complete 必须为 false，
-  并把遗漏写入 uncovered_claims。
 """.strip()
 
 
@@ -115,6 +134,93 @@ def _fallback_facts(content: str) -> list[dict]:
     }]
 
 
+def _source_span(source: str, excerpts: list[str]) -> str:
+    """Return the smallest source substring covering valid supporting quotes."""
+
+    positions = []
+    for excerpt in excerpts:
+        value = _clean(excerpt, 12000)
+        if not value:
+            continue
+        start = source.find(value)
+        if start < 0:
+            return ""
+        positions.append((start, start + len(value)))
+    if not positions:
+        return ""
+    return source[min(start for start, _ in positions):max(end for _, end in positions)]
+
+
+def _structured_knowledge_units(parsed: dict, source: str) -> list[dict] | None:
+    """Parse the semantic extraction contract without inventing provenance."""
+
+    raw_units = parsed.get("knowledge_units")
+    raw_claims = parsed.get("claims")
+    if not isinstance(raw_units, list) or not isinstance(raw_claims, list):
+        return None
+    known_claim_ids = set()
+    for claim in raw_claims:
+        if not isinstance(claim, dict):
+            return None
+        claim_id = _clean(claim.get("id"), 100)
+        claim_text = _clean(claim.get("text") or claim.get("source_excerpt"), 12000)
+        if not claim_id or not claim_text or claim_text not in source or claim_id in known_claim_ids:
+            return None
+        known_claim_ids.add(claim_id)
+    result = []
+    for item in raw_units:
+        if not isinstance(item, dict):
+            return None
+        content = _clean(item.get("canonical_fact") or item.get("content") or item.get("fact"))
+        if not content:
+            return None
+        supplied_excerpt = _clean(item.get("source_excerpt"), 12000)
+        if supplied_excerpt and supplied_excerpt in source:
+            source_excerpt = supplied_excerpt
+        else:
+            supporting = item.get("supporting_claims") or item.get("supporting_points") or []
+            if isinstance(supporting, str):
+                supporting = [supporting]
+            if not isinstance(supporting, list):
+                return None
+            source_excerpt = _source_span(source, [str(value) for value in supporting])
+        if not source_excerpt:
+            return None
+        supporting_claim_ids = item.get("supporting_claim_ids") or []
+        if isinstance(supporting_claim_ids, str):
+            supporting_claim_ids = [supporting_claim_ids]
+        if (
+            not isinstance(supporting_claim_ids, list)
+            or not supporting_claim_ids
+            or not all(isinstance(value, str) and value.strip() for value in supporting_claim_ids)
+            or not set(supporting_claim_ids).issubset(known_claim_ids)
+        ):
+            return None
+        result.append({
+            "title": _clean(item.get("title"), 500) or content[:120],
+            "content": content,
+            "entity_name": _clean(item.get("entity_name") or item.get("subject"), 500),
+            "derived": bool(item.get("derived") or item.get("inferred")),
+            "source_excerpt": source_excerpt,
+            "supporting_claim_ids": [value.strip() for value in supporting_claim_ids],
+            "supporting_points": [str(value) for value in (item.get("supporting_points") or []) if str(value).strip()],
+        })
+    return result
+
+
+def _structured_coverage_matches_claims(parsed: dict) -> bool:
+    """Require every declared evidence claim to appear in the coverage map."""
+
+    claims = parsed.get("claims")
+    coverage = parsed.get("coverage")
+    coverage_claims = coverage.get("claims") if isinstance(coverage, dict) else None
+    if not isinstance(claims, list) or not isinstance(coverage_claims, list):
+        return False
+    claim_ids = {_clean(item.get("id"), 100) for item in claims if isinstance(item, dict)}
+    covered_ids = {_clean(item.get("id"), 100) for item in coverage_claims if isinstance(item, dict)}
+    return bool(claim_ids) and claim_ids == covered_ids
+
+
 def _model_facts(
     content: str,
     llm_service=None,
@@ -139,6 +245,20 @@ def _model_facts(
     messages.append({"role": "user", "content": content})
     try:
         parsed = parse_json_response(llm_service.extract(messages, max_tokens=max_tokens))
+        if isinstance(parsed, dict) and "knowledge_units" in parsed:
+            facts = _structured_knowledge_units(parsed, content)
+            if (
+                facts is None
+                or not _structured_coverage_matches_claims(parsed)
+                or not extraction_coverage_is_complete(
+                    content,
+                    facts,
+                    parsed.get("coverage"),
+                )
+            ):
+                log.warning("V2 semantic extraction contract invalid; keeping a provisional raw interpretation")
+                return _fallback_facts(content), True
+            return facts, False
         raw_facts = parsed.get("facts") if isinstance(parsed, dict) else None
         if not isinstance(raw_facts, list):
             raw_facts = [parsed] if isinstance(parsed, dict) and parsed.get("content") else []
