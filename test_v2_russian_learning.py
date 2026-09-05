@@ -58,7 +58,7 @@ def legacy_extraction(source, content, *, title="Fact", entity_name=""):
 
 class RussianKnowledgeLearningTest(unittest.TestCase):
     def test_extraction_prompt_requires_russian_knowledge(self):
-        self.assertIn("title 和 canonical_fact 必须用俄语", UNDERSTANDING_SYSTEM_PROMPT)
+        self.assertIn("title、canonical_fact、scope 和 conditions 都是面向用户的知识字段，必须用俄语", UNDERSTANDING_SYSTEM_PROMPT)
         self.assertIn("无论原文是中文、英文还是其他语言", UNDERSTANDING_SYSTEM_PROMPT)
 
     def test_english_fact_is_normalized_to_russian_and_keeps_markers(self):

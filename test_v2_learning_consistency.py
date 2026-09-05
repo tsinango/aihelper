@@ -20,6 +20,42 @@ class _LegacyLLM:
         return json.dumps(self.payload, ensure_ascii=False)
 
 
+class _StructuredLLM:
+    def __init__(self, payloads):
+        self.payloads = iter(payloads)
+        self.calls = []
+
+    def extract_structured(self, messages, schema, max_tokens=800):
+        self.calls.append((messages, schema, max_tokens))
+        return json.dumps(next(self.payloads), ensure_ascii=False)
+
+
+def _structured_payload(source, *, scope="", conditions=None):
+    return {
+        "claims": [{"id": "c1", "text": source}],
+        "knowledge_units": [{
+            "title": "Поддержка PoE+",
+            "canonical_fact": "Камера поддерживает PoE+.",
+            "entity_name": "F-X",
+            "supporting_claim_ids": ["c1"],
+            "source_excerpt": source,
+            "derived": False,
+            "scope": scope,
+            "conditions": conditions or [],
+        }],
+        "coverage": {
+            "complete": True,
+            "claims": [{
+                "id": "c1",
+                "text": source,
+                "knowledge_unit_indexes": [0],
+                "disposition": "knowledge",
+            }],
+            "uncovered_claims": [],
+        },
+    }
+
+
 class LearningConsistencyTest(unittest.TestCase):
     def test_legacy_facts_keep_scope_and_conditions(self):
         source = "F-X поддерживает режим при низкой освещенности."
@@ -194,32 +230,93 @@ class LearningConsistencyTest(unittest.TestCase):
 
     def test_structured_output_conditions_are_materialized_before_proposal(self):
         source = "The camera supports PoE+ when used with a compatible power sourcing device."
-        payload = {
-            "claims": [{"id": "c1", "text": source}],
-            "knowledge_units": [{
-                "title": "Поддержка PoE+",
-                "canonical_fact": "Камера поддерживает PoE+.",
-                "entity_name": "F-X",
-                "supporting_claim_ids": ["c1"],
-                "source_excerpt": source,
-                "derived": False,
-                "scope": "",
-                "conditions": ["при использовании совместимого источника питания"],
-            }],
-            "coverage": {
-                "complete": True,
-                "claims": [{
-                    "id": "c1",
-                    "text": source,
-                    "knowledge_unit_indexes": [0],
-                    "disposition": "knowledge",
-                }],
-                "uncovered_claims": [],
-            },
-        }
-        facts, fallback = _model_facts(source, _LegacyLLM(payload), normalize_to_russian=True)
+        payload = _structured_payload(
+            source,
+            conditions=["при использовании совместимого источника питания"],
+        )
+        facts, fallback = _model_facts(source, _StructuredLLM([payload]), normalize_to_russian=True)
         self.assertFalse(fallback)
         self.assertEqual(facts[0]["content"].count("при использовании совместимого источника питания"), 1)
+
+    def test_english_condition_fails_then_repair_uses_russian(self):
+        source = "The camera supports PoE+ when used with a compatible PSE."
+        llm = _StructuredLLM([
+            _structured_payload(source, conditions=["when used with a compatible PSE"]),
+            _structured_payload(source, conditions=["при использовании совместимого PSE"]),
+        ])
+        facts, fallback = _model_facts(source, llm, normalize_to_russian=True)
+
+        self.assertFalse(fallback)
+        self.assertEqual(len(llm.calls), 2)
+        self.assertIn("при использовании совместимого PSE", facts[0]["content"])
+        self.assertNotIn("when used with", facts[0]["content"])
+
+    def test_english_scope_fails_then_repair_uses_russian(self):
+        source = "The camera supports PoE+ for outdoor installation."
+        llm = _StructuredLLM([
+            _structured_payload(source, scope="for outdoor installation"),
+            _structured_payload(source, scope="для наружной установки"),
+        ])
+        facts, fallback = _model_facts(source, llm, normalize_to_russian=True)
+
+        self.assertFalse(fallback)
+        self.assertEqual(len(llm.calls), 2)
+        self.assertIn("для наружной установки", facts[0]["content"])
+        self.assertNotIn("for outdoor", facts[0]["content"])
+
+    def test_russian_scope_and_condition_are_accepted(self):
+        source = "Камера поддерживает PoE+ для наружной установки."
+        llm = _StructuredLLM([_structured_payload(
+            source,
+            scope="для наружной установки",
+            conditions=["при использовании совместимого источника питания"],
+        )])
+        facts, fallback = _model_facts(source, llm, normalize_to_russian=True)
+
+        self.assertFalse(fallback)
+        self.assertEqual(len(llm.calls), 1)
+
+    def test_russian_prose_with_technical_markers_is_accepted(self):
+        source = "Камера поддерживает PoE+ и ONVIF Profile T."
+        llm = _StructuredLLM([_structured_payload(
+            source,
+            conditions=["при использовании PoE+ и ONVIF Profile T"],
+        )])
+        facts, fallback = _model_facts(source, llm, normalize_to_russian=True)
+
+        self.assertFalse(fallback)
+        self.assertEqual(len(llm.calls), 1)
+        self.assertIn("PoE+ и ONVIF Profile T", facts[0]["content"])
+
+    def test_non_russian_condition_fails_closed_after_one_repair(self):
+        source = "The camera supports PoE+ when used with a compatible PSE."
+        invalid = _structured_payload(source, conditions=["when used with a compatible PSE"])
+        llm = _StructuredLLM([invalid, invalid])
+        facts, fallback = _model_facts(source, llm, normalize_to_russian=True)
+
+        self.assertTrue(fallback)
+        self.assertEqual(facts, [])
+        self.assertEqual(len(llm.calls), 2)
+
+    def test_non_russian_condition_is_rejected_on_default_learning_path(self):
+        source = "The camera supports PoE+ when used with a compatible PSE."
+        invalid = _structured_payload(source, conditions=["when used with a compatible PSE"])
+        llm = _StructuredLLM([invalid, invalid])
+        facts, fallback = _model_facts(source, llm)
+
+        self.assertTrue(fallback)
+        self.assertEqual(facts, [])
+        self.assertEqual(len(llm.calls), 2)
+
+    def test_chinese_condition_fails_closed_after_one_repair(self):
+        source = "在使用兼容供电设备时，该摄像机支持 PoE+。"
+        invalid = _structured_payload(source, conditions=["在使用兼容供电设备时"])
+        llm = _StructuredLLM([invalid, invalid])
+        facts, fallback = _model_facts(source, llm, normalize_to_russian=True)
+
+        self.assertTrue(fallback)
+        self.assertEqual(facts, [])
+        self.assertEqual(len(llm.calls), 2)
 
     def test_russian_fallback_never_returns_non_russian_fact(self):
         facts, fallback = _model_facts(

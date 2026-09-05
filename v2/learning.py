@@ -85,8 +85,8 @@ UNDERSTANDING_SYSTEM_PROMPT = """
     "supporting_claim_ids":["c1"],
     "source_excerpt":"覆盖支持 claims 的连续原文片段",
     "derived":false,
-    "scope":"适用范围，没有则为空字符串",
-    "conditions":[]
+    "scope":"俄语适用范围，没有则为空字符串",
+    "conditions":["俄语条件，没有则为空数组"]
   }],
   "coverage":{
     "complete":true,
@@ -107,7 +107,7 @@ UNDERSTANDING_SYSTEM_PROMPT = """
 - 反例与正例： “The camera has 8 MP resolution and supports PoE.” → 两个 units；“The camera keeps the overall scene visible while zooming. This reduces blind spots.” → 一个 unit，后一句作为同一能力的直接效果。请优先遵循这个区别。
 - canonical_fact 不要逐字复制整段输入，也不要把“本段没有说明某参数”这类元评论写成产品事实。只保留可引用的产品结论，通常比原文更短；但不能为变短而丢失技术意义、条件或否定边界。
 - 原文明确写出的限制、否定边界和“无法从资料推导”的结论仍是可引用知识，不是 UNCLEAR，也不是 derived；只有模型自己超出原文做出的推断才将 derived 设为 true。
-- title 和 canonical_fact 必须用俄语书写，无论原文是中文、英文还是其他语言。产品名、型号、SKU、协议名、标准名和常见技术缩写（例如 TandemVu、H.265、PoE、ONVIF、PTZ）保持原样，不要翻译成臆造的名称。entity_name 用于精确匹配，可以保留规范产品名或型号。
+- title、canonical_fact、scope 和 conditions 都是面向用户的知识字段，必须用俄语书写，无论原文是中文、英文还是其他语言。非空 scope 和 conditions 不能留下英文或中文自然语言。产品名、型号、SKU、协议名、标准名、固件/版本标识、常见技术缩写以及数字和单位（例如 TandemVu、H.265、PoE、ONVIF、PTZ、Profile T、IP67）保持原样，不要翻译成臆造的名称。entity_name 用于精确匹配，可以保留规范产品名或型号。
 - 营销性结论（例如“提升安全性”“优秀用户体验”）如果没有独立可验证的产品事实，可作为 claim 记录，但应将 disposition 设为 non_knowledge，不要单独创建 knowledge_unit。
 - source_excerpt 必须是输入中的连续原文片段，并覆盖该 unit 的支持 claims；不要伪造引用。supporting_claim_ids 必须引用 claims 中的 id。
 - 不要把单型号推广到系列，不要根据型号命名或行业常识推断范围。
@@ -562,6 +562,45 @@ def _has_russian_prose(value: str) -> bool:
     return len(re.findall(r"[А-Яа-яЁё]", str(value or ""))) >= 3
 
 
+_QUALIFIER_ENGLISH_PROSE = frozenset({
+    "a", "an", "the", "when", "if", "used", "use", "using", "with", "for", "from",
+    "compatible", "compatibility", "source", "sourcing", "power", "device",
+    "devices", "outdoor", "indoor", "installation", "installations", "only",
+    "under", "during", "before", "after", "and", "or", "not", "does", "on",
+    "support", "supports", "supported", "can", "cannot", "must", "guarantee",
+    "guarantees", "guaranteed", "according", "to", "this", "that", "model",
+    "configured", "configuration", "enabled", "option", "options", "available",
+    "depending", "depends", "required", "requires", "provides", "providing",
+})
+_QUALIFIER_CHINESE_PROSE = frozenset({
+    "在", "使用", "兼容", "设备", "供电", "时", "如果", "当", "支持",
+    "采用", "条件", "来源", "仅", "不能", "不支持", "摄像机", "相机",
+})
+
+
+def _has_russian_qualifier_prose(value: str) -> bool:
+    """Accept Russian qualifier prose while allowing technical identifiers.
+
+    This is intentionally a small contract check, not a translation engine.
+    Product names, acronyms, protocols, profiles, versions and numeric
+    markers remain valid; ordinary English or Chinese qualifier prose fails
+    closed and is sent through the existing repair retry.
+    """
+
+    text = _clean(value, 2000)
+    if not text:
+        return False
+    if not _has_russian_prose(text):
+        return False
+    if any(marker in text for marker in _QUALIFIER_CHINESE_PROSE):
+        return False
+    english_words = {
+        token.casefold()
+        for token in re.findall(r"[A-Za-z]+", text)
+    }
+    return not english_words.intersection(_QUALIFIER_ENGLISH_PROSE)
+
+
 def _stable_technical_markers(value: str) -> set[str]:
     """Collect markers that a translation must preserve verbatim."""
 
@@ -575,9 +614,22 @@ def _stable_technical_markers(value: str) -> set[str]:
     return markers
 
 
+def _validate_russian_qualifiers(facts: list[dict]) -> None:
+    """Validate scope and conditions independently from composed content."""
+
+    for fact in facts:
+        scope = _clean(fact.get("scope"), 2000)
+        if scope and not _has_russian_qualifier_prose(scope):
+            raise ValueError("learning extraction returned a non-Russian scope")
+        for condition in _condition_values(fact.get("conditions")):
+            if not _has_russian_qualifier_prose(condition):
+                raise ValueError("learning extraction returned a non-Russian condition")
+
+
 def _validate_russian_facts(facts: list[dict]) -> None:
     """Reject model output that is not already Russian and lossless enough."""
 
+    _validate_russian_qualifiers(facts)
     source_markers = set()
     content_markers = set()
     for fact in facts:
@@ -632,9 +684,10 @@ def _model_facts(
         messages.append({
             "role": "user",
             "content": (
-                "上一次输出没有通过 claims、source_excerpt 或 coverage 校验。"
+                "上一次输出没有通过 claims、source_excerpt、coverage 或俄语字段校验。"
                 "请重新检查原文的每个明确主张，保持 claim text 和 source_excerpt 为原文连续片段，"
-                "补齐 coverage 后只返回符合约定的 JSON。"
+                "补齐 coverage，并确保 title、canonical_fact、scope、conditions 中的自然语言都是俄语；"
+                "技术标识可以保持原样，然后只返回符合约定的 JSON。"
             ),
         })
     messages.append({"role": "user", "content": content})
@@ -655,6 +708,7 @@ def _model_facts(
             ):
                 raise ValueError("V2 semantic extraction contract invalid")
             facts = _postprocess_semantic_units(facts)
+            _validate_russian_qualifiers(facts)
             if normalize_to_russian:
                 _validate_russian_facts(facts)
             return facts, False
@@ -705,6 +759,7 @@ def _model_facts(
                 if len(facts) == 1
                 else [_compose_fact_content(fact) for fact in facts]
             )
+            _validate_russian_qualifiers(facts)
             if normalize_to_russian:
                 _validate_russian_facts(facts)
             return facts, False
