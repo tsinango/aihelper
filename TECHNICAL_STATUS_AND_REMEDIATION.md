@@ -1,7 +1,31 @@
-# AI Sales Engineer：技术现状、已知问题与整改方案
+# aihelper：技术现状、已知问题与整改方案
 
-更新日期：2026-09-02
+更新日期：2026-09-05（主体历史快照：2026-09-02）
 适用环境：`/opt/aihelper` 当前生产迁移版本
+
+## 当前 V2 附录（2026-09-05）
+
+本文件主体保留 2026-09-02 的 V1 历史快照和整改记录；以下是当前 V2 运行状态，
+避免把历史数据快照误认为最新产品状态。
+
+- V2 迁移 `013`–`020` 已应用。`013`–`019` 提供 Inbox learning、bulk/durable job、
+  worker heartbeat、轻量 Organization 和 Knowledge history；`020` 增加 Entity/Relation
+  软删除所需的 `deactivated_at`。
+- 生产由 `aihelper.service` 和 `aihelper-inbox-worker.service` 两个 systemd 进程组成，
+  工作目录为 `/opt/aihelper`，环境文件为 `/etc/aihelper.env`。`/ready` 检查 PostgreSQL、
+  schema 和 Inbox worker heartbeat。
+- V2 Learning 使用 OpenRouter 的 `openai/gpt-oss-20b:free` Structured Outputs。
+  正常路径一次调用，最多一次 repair；失败时保留 Raw Evidence，不将原文 fallback 成
+  Knowledge。V1 客户问答仍使用本文后述的 Nemotron 生成链路。
+- V2 Knowledge 保持 Russian canonical content、trust 和 provenance。人工维护不调用
+  LLM；编辑内容会清空旧 embedding，删除/恢复/移动通过 stable Knowledge ID 和 history
+  保留审计关系。
+- Entity Tree 是局部、轻量组织层。只有整个 active subtree 没有 active 或 deleted
+  Knowledge 引用时，用户才可以手动 prune；操作为软删除并在数据库事务内重新校验，
+  不做自动 gardening 或全局重建。
+- 当前完整回归结果：pytest `250 passed, 8 skipped`；unittest `258 OK, 8 skipped`。
+
+日常运维和迁移命令以 [`OPERATIONS.md`](OPERATIONS.md) 为准。
 
 ## 1. 文档目的
 
@@ -287,7 +311,7 @@ Telegram 聊天记录属于潜在敏感数据。任何归档或外发前应：
 
 1. 明确接收方和保留期限；
 2. 检查是否包含姓名、手机号、账号、序列号、现场地址、图片和外部私有链接；
-3. 排除 `tgtoken`、`/etc/ai-sales-engineer.env`、数据库 dump、API key 和运行日志；
+3. 排除 `tgtoken`、`/etc/aihelper.env`、数据库 dump、API key 和运行日志；
 4. 生成并记录压缩包 SHA-256；
 5. 优先使用受控、可撤销访问的存储。若使用公共临时文件服务，应把链接视为可转发的公开访问凭据。
 

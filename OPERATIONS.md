@@ -159,8 +159,10 @@ sudo -u postgres psql -d ai_sales_engineer -c "select count(*) from document_chu
 OpenRouter configuration uses the raw token file
 `/opt/aihelper/openrouter` (mode 600) and the protected environment
 file `/etc/aihelper.env` (root:ubuntu, mode 640 so the systemd service user can
-read it). Provider and model slugs are
-fixed in source.
+read it). OpenRouter is the only provider. V1 generation, embeddings, and
+optional reranking use the fixed free slugs in source; V2 Learning extraction
+defaults to the free Structured Outputs model below and must not be changed to
+a paid fallback.
 
 Required variables:
 
@@ -168,6 +170,7 @@ Required variables:
 OPENROUTER_TOKEN_FILE=/opt/aihelper/openrouter
 OPENROUTER_TIMEOUT_SECONDS=120
 OPENROUTER_RERANK_ENABLED=true
+V2_LEARNING_MODEL=openai/gpt-oss-20b:free
 INBOX_WORKER_NAME=aihelper-inbox-worker
 INBOX_WORKER_HEARTBEAT_INTERVAL_SECONDS=10
 INBOX_WORKER_HEALTHY_THRESHOLD_SECONDS=45

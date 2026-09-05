@@ -19,13 +19,15 @@ The codebase is in transition between two generations:
   `/review/published`) where reviewers approve Telegram-derived support-case
   knowledge into published `verified_knowledge`. Only published knowledge may
   answer customers; historical case memory is recall/reviewer evidence only.
-- **V2** (in progress, Phases 1–2 of `V2_REFACTOR_PLAN.md`): a new Inbox-first
+- **V2** (Phases 1–2.2 implemented; Phase 3 is not exposed): a new Inbox-first
   learning loop under `v2/` with its own `v2_`-prefixed tables, pages
   (`/inbox`, `/knowledge`, `/documents`, `/chat`) and `/api/v2/*` routes.
   Knowledge carries one of four trust values (`official_source`,
   `user_confirmed`, `provisional`, `conflicted`) and only confirmed/official
   knowledge may eventually pass the customer-answer gate. V2 is isolated from
-  V1 tables and code paths and must stay additive.
+  V1 tables and code paths and must stay additive. The current V2 main
+  navigation exposes Inbox, Knowledge, and Documents; Chat remains a
+  compatibility route until Grounded QA is complete.
 
 Key design docs: `README.md` (usage and pipeline), `OPERATIONS.md` (runbook:
 systemd, batch jobs, review workflow), `TECHNICAL_STATUS_AND_REMEDIATION.md`
@@ -54,19 +56,21 @@ systemd, batch jobs, review workflow), `TECHNICAL_STATUS_AND_REMEDIATION.md`
 - `telegram_relations.py` — conservative Telegram message role/relation
   classification; manual relations outrank inferred ones.
 - `logging_security.py` — in-memory Telegram bot token redaction for logs.
-- `v2/` — `service.py` (SQL persistence), `learning.py` (text-only learning
-  state machine; only an explicit user confirmation moves knowledge to
-  `user_confirmed`), `compare.py` (LLM-assisted NEW/CONFIRM/ENRICH/CONFLICT/
-  UNCLEAR decisions with safety checks owned by Python), `retrieval.py`
+- `v2/` — `service.py` (SQL persistence and Knowledge maintenance/pruning),
+  `learning.py` (text-only learning state machine; only an explicit user
+  confirmation moves knowledge to `user_confirmed`), `compare.py` (LLM-assisted
+  NEW/CONFIRM/ENRICH/CONFLICT/UNCLEAR decisions with safety checks owned by
+  Python), `processing.py` (durable PostgreSQL-backed Inbox jobs),
+  `organization.py` (small local Entity organization), and `retrieval.py`
   (small-corpus lexical + vector retrieval over `v2_knowledge`).
 - `templates/` — V2 pages (`inbox.html`, `knowledge.html`, `documents.html`,
   `chat.html`, Chinese UI). `review.html` and `published.html` at repo root
   serve the V1 review UI.
-- `schema.sql` + `migrations/` — additive SQL migrations `001`–`018`;
-  `013_v2_skeleton.sql` through `016_v2_inbox_processing_jobs.sql` are the V2
-  learning/job tables, `017_v2_inbox_worker_heartbeat.sql` is operational
-  worker liveness state, and `018_v2_organization.sql` is the lightweight
-  entity/relation layer.
+- `schema.sql` + `migrations/` — additive SQL migrations `001`–`020`;
+  `013_v2_skeleton.sql` through `017_v2_inbox_worker_heartbeat.sql` are the V2
+  learning/job/worker tables, `018_v2_organization.sql` is the lightweight
+  entity/relation layer, `019_v2_knowledge_history.sql` is the Knowledge audit
+  history, and `020_v2_entity_pruning.sql` adds soft-pruning timestamps.
   `apply_migration.py` records SHA-256 checksums in `schema_migrations` and
   rejects changed or out-of-tree migration files.
 - Batch/offline scripts (top level): `organize_telegram_knowledge.py`
@@ -92,8 +96,9 @@ python3 -m venv .venv           # if needed
 .venv/bin/python -m pip install -r requirements.txt
 ```
 
-Run the complete test suite (baseline: 124 tests, all passing, 8 skipped —
-requires no database or network):
+Run the complete test suite (current baseline: 250 pytest tests and 258
+unittest tests, all passing; PostgreSQL integration tests are skipped without
+a test URL — the rest requires no database or network):
 
 ```bash
 .venv/bin/python -m unittest discover -p 'test_*.py'
@@ -125,6 +130,7 @@ the systemd service user can read it):
 OPENROUTER_TOKEN_FILE=/opt/aihelper/openrouter
 OPENROUTER_TIMEOUT_SECONDS=120
 OPENROUTER_RERANK_ENABLED=true
+V2_LEARNING_MODEL=openai/gpt-oss-20b:free
 INBOX_WORKER_NAME=aihelper-inbox-worker
 INBOX_WORKER_HEARTBEAT_INTERVAL_SECONDS=10
 INBOX_WORKER_HEALTHY_THRESHOLD_SECONDS=45
@@ -172,4 +178,4 @@ screenshots for `/review` or V2 page UI changes; call out required
 environment variables, migrations, deployment steps, and rollback
 considerations. V2 work follows the phase discipline in
 `V2_REFACTOR_PLAN.md`: keep V1 routes and tests passing, keep migrations
-additive, and stop at the Phase 2 UX gate without manual sign-off.
+additive, and stop at the Phase 2.2 UX gate without starting Phase 3.

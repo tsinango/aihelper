@@ -20,6 +20,68 @@ INBOX_WORKER_HEARTBEAT_INTERVAL_SECONDS=10
 INBOX_WORKER_HEALTHY_THRESHOLD_SECONDS=45
 ```
 
+## V2 当前状态（截至 2026-09-05）
+
+V2 已完成 Phase 2.2 的生产闭环，当前入口是 Inbox-first 的产品知识学习：
+
+```text
+Raw Evidence
+  → OpenRouter Structured Learning
+  → 语义归并、俄语规范化
+  → Pending Knowledge
+  → 用户确认
+  → 可追溯 Knowledge
+```
+
+Learning extraction 默认使用免费的
+`openai/gpt-oss-20b:free`（可通过 `V2_LEARNING_MODEL` 配置，但必须保持
+OpenRouter free endpoint）。正常路径只进行一次 LLM 调用；只有 JSON、俄语、
+技术标记或 evidence contract 校验失败时才进行一次 repair。持续失败会保留
+Raw Evidence，但不会把原文直接写入 Knowledge。
+
+Knowledge 页面提供简单维护能力：搜索、编辑、软删除、恢复、调整 Entity、查看
+来源和修改历史。人工修改 Knowledge 不调用 LLM，保持 Knowledge ID 和 provenance；
+修改内容会清空旧 embedding，后续由 `reembed.py` 重新生成。Raw Evidence 不会被
+编辑或删除。
+
+Entity Tree 只提供轻量组织层。用户可以手动删除完全为空的 Entity 分支；只要该
+Entity 或其子树仍被 active 或 deleted Knowledge 引用，后端都会拒绝 prune。结构
+删除是 `active=false` 的软删除，不会物理删除 Entity、relation 或 Knowledge。
+
+当前 V2 生产进程：
+
+- `aihelper.service`：FastAPI Web 服务
+- `aihelper-inbox-worker.service`：PostgreSQL durable Inbox worker
+
+运行状态通过 `/health` 和 `/ready` 检查；`/ready` 同时验证 PostgreSQL、必要 schema
+和 worker heartbeat。部署、迁移和故障排查见 [`OPERATIONS.md`](OPERATIONS.md)。
+
+V2 当前已应用迁移 `013`–`020`，包括 bulk intake、durable job、worker heartbeat、
+轻量 Entity organization、Knowledge history 和安全的 Entity pruning。
+
+未完成的 Chat Grounded QA、全局 Knowledge Gardening、复杂 taxonomy、Ontology、
+Knowledge Graph editor 和 Telegram V2 接入不会进入当前 V2 主导航或主流程。
+
+## V2 页面
+
+- `/inbox`：提交资料、查看处理状态、确认或编辑 Pending Knowledge。
+- `/knowledge`：维护已保存 Knowledge、来源、历史和 Entity Tree。
+- `/documents`：查看现有文档资产；文档学习管道仍未作为 V2 Learning 主入口。
+
+直接路由 `/chat` 保留作兼容页面，但 Grounded QA 尚未作为当前 V2 产品能力开放。
+
+## 测试
+
+完整回归测试：
+
+```bash
+.venv/bin/python -m pytest -q
+.venv/bin/python -m unittest discover -p 'test_*.py'
+.venv/bin/python -m compileall -q app.py llm.py reembed.py worker.py v2
+```
+
+PostgreSQL 集成测试需要设置 `V2_TEST_DATABASE_URL`；测试使用外层事务并回滚写入。
+
 ## 本机 Qwen 评测（仅影子评测）
 
 本机 Qwen3.5 GGUF 只用于离线生成器比较，不接入生产问答路径。评测时
@@ -68,8 +130,8 @@ once as a group. It does not approve or publish knowledge by itself. The
 resume command and quota behavior are documented in `OPERATIONS.md`.
 
 ```bash
-python -m pip install -r requirements.txt
-DATABASE_URL=postgresql://... python -m uvicorn app:app --host 127.0.0.1 --port 8000
+.venv/bin/python -m pip install -r requirements.txt
+DATABASE_URL=postgresql://... .venv/bin/python -m uvicorn app:app --host 127.0.0.1 --port 8000
 ```
 
 The service keeps the Worker routes `/health`, `/api/v1/query`, `/api/v1/documents`,
