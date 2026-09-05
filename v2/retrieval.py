@@ -23,6 +23,21 @@ def _models(value: Any) -> set[str]:
     return {item.casefold() for item in _MODEL_RE.findall(_text(value))}
 
 
+def _explicit_model_identifiers(value: Any) -> set[str]:
+    """Return conservative model-like tokens for comparison isolation."""
+
+    result = set(_models(value))
+    for token in _TOKEN_RE.findall(_text(value)):
+        if (
+            re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9./()_-]{2,}", token)
+            and "-" in token
+            and token == token.upper()
+            and any(char.isalpha() for char in token)
+        ):
+            result.add(token.casefold())
+    return result
+
+
 def _same_model(query: str, row: dict) -> bool:
     entity = _text(row.get("entity_name"), 500).casefold()
     return bool(entity and (entity in query.casefold() or entity in _models(query)))
@@ -96,7 +111,8 @@ def store_knowledge_embedding(conn, knowledge_id: int, text: str, *, embedder=No
 
 
 def retrieve_learning_knowledge(conn, query: str, *, embedder=None, top_k: int = 8,
-                                lexical_k: int | None = None, embedding_k: int | None = None) -> list[dict]:
+                                lexical_k: int | None = None, embedding_k: int | None = None,
+                                same_model_only: bool = False) -> list[dict]:
     """Merge same-model-first lexical hits with an exact embedding scan.
 
     Vectors are compared in Python because the V2 data set is small. No vector
@@ -110,6 +126,13 @@ def retrieve_learning_knowledge(conn, query: str, *, embedder=None, top_k: int =
     lexical_k = top_k if lexical_k is None else max(1, int(lexical_k))
     embedding_k = top_k if embedding_k is None else max(1, int(embedding_k))
     rows = _rows(conn)
+    if same_model_only:
+        query_models = _explicit_model_identifiers(query)
+        if query_models:
+            rows = [
+                row for row in rows
+                if query_models & _explicit_model_identifiers(row.get("entity_name"))
+            ]
     scored = {}
     for row in rows:
         score = _lexical_score(query, row)

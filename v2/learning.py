@@ -53,6 +53,18 @@ _BINARY_QUESTION_MARKERS = (
     "да или нет", "верно ли", "является ли", "ли?",
 )
 
+_CONJOINED_PREDICATE_RE = re.compile(
+    r"^(?P<left>.+?)\s+(?:and|以及|并且|并)\s+"
+    r"(?P<right>(?:supports?|has|have|provides?|uses?|includes?|offers?|features?|is|are|支持|具备|采用|提供|包括).+?)"
+    r"[.!。！？?]*$",
+    re.IGNORECASE,
+)
+_SEMANTIC_STOPWORDS = frozenset({
+    "a", "an", "the", "this", "that", "it", "is", "are", "has", "have",
+    "and", "or", "to", "of", "for", "with", "while", "can", "may", "will", "at",
+    "camera", "cameras", "device", "devices", "model", "产品", "设备", "摄像机",
+})
+
 UNDERSTANDING_SYSTEM_PROMPT = """
 你是一个产品知识学习助理。你正在和产品专家聊天，不是在维护数据库。
 请从用户刚刚提供的原文中先识别 evidence claims，再把语义上属于同一个产品知识的 claims 归并为 knowledge_units，返回严格 JSON：
@@ -81,6 +93,9 @@ UNDERSTANDING_SYSTEM_PROMPT = """
 - 每个被映射到 knowledge_unit 的 claim 的技术意义都必须体现在 canonical_fact 中；不能只保留第一句而静默丢弃后续技术说明。只有确实没有独立可验证产品事实的营销性 claim 才可以标记为 non_knowledge。
 - 只有不同型号、不同独立参数、不同条件/版本/地区，或明确矛盾的事实才必须拆成不同 knowledge_units。一个句子可能有多个 units，多句话也可能只有一个 unit。
 - 能力与其直接解释或结果可以合并。例如“保持全景同时查看局部细节”与“减少变焦/云台导致的盲区”通常是同一技术能力的一个 knowledge_unit；不要为了句号数量拆分。
+- 不要因为 subject 相同或句子中出现“and/以及”就合并独立属性。例如“The camera has 8 MP resolution and supports PoE.”必须输出两个 knowledge_units，分别保留分辨率和供电方式；一个句子不等于一个 unit。
+- 反例与正例： “The camera has 8 MP resolution and supports PoE.” → 两个 units；“The camera keeps the overall scene visible while zooming. This reduces blind spots.” → 一个 unit，后一句作为同一能力的直接效果。请优先遵循这个区别。
+- canonical_fact 不要逐字复制整段输入，也不要把“本段没有说明某参数”这类元评论写成产品事实。只保留可引用的产品结论，通常比原文更短；但不能为变短而丢失技术意义、条件或否定边界。
 - 营销性结论（例如“提升安全性”“优秀用户体验”）如果没有独立可验证的产品事实，可作为 claim 记录，但应将 disposition 设为 non_knowledge，不要单独创建 knowledge_unit。
 - source_excerpt 必须是输入中的连续原文片段，并覆盖该 unit 的支持 claims；不要伪造引用。supporting_claim_ids 必须引用 claims 中的 id。
 - 不要把单型号推广到系列，不要根据型号命名或行业常识推断范围。
@@ -222,6 +237,108 @@ def _structured_coverage_matches_claims(parsed: dict) -> bool:
     return bool(claim_ids) and claim_ids == covered_ids
 
 
+def _meaningful_tokens(value: str, entity_name: str = "") -> set[str]:
+    tokens = {
+        token.casefold()
+        for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9./()_-]*|[\u4e00-\u9fff]", value)
+    }
+    entity_tokens = {
+        token.casefold()
+        for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9./()_-]*|[\u4e00-\u9fff]", entity_name)
+    }
+    return {token for token in tokens if token not in _SEMANTIC_STOPWORDS and token not in entity_tokens}
+
+
+def _same_entity(left: dict, right: dict) -> bool:
+    left_entity = _clean(left.get("entity_name"), 500).casefold()
+    right_entity = _clean(right.get("entity_name"), 500).casefold()
+    return bool(left_entity and left_entity == right_entity)
+
+
+def _related_semantic_units(left: dict, right: dict) -> bool:
+    """Recognize only high-confidence same-feature continuations.
+
+    This is deliberately lexical and local: it prevents a mechanism sentence
+    and its direct effect from becoming two confirmations, while unrelated
+    attributes such as resolution and PoE have no meaningful overlap.
+    """
+
+    if not _same_entity(left, right):
+        return False
+    left_tokens = _meaningful_tokens(left.get("content", ""), left.get("entity_name", ""))
+    right_tokens = _meaningful_tokens(right.get("content", ""), right.get("entity_name", ""))
+    left_numbers = set(re.findall(r"\d+(?:\.\d+)?", left.get("content", "")))
+    right_numbers = set(re.findall(r"\d+(?:\.\d+)?", right.get("content", "")))
+    if left_numbers and right_numbers and left_numbers.isdisjoint(right_numbers):
+        return False
+    shared = left_tokens & right_tokens
+    smaller = min(len(left_tokens), len(right_tokens))
+    return len(shared) >= 2 and smaller > 0 and len(shared) / smaller >= 0.25
+
+
+def _consolidate_related_units(facts: list[dict]) -> list[dict]:
+    """Merge adjacent same-entity units only when their wording overlaps."""
+
+    if len(facts) < 2:
+        return facts
+    result: list[dict] = []
+    for fact in facts:
+        if result and _related_semantic_units(result[-1], fact):
+            previous = result[-1]
+            previous["content"] = f"{previous['content'].rstrip('.。')}。{fact['content'].lstrip()}"
+            previous["supporting_claim_ids"] = list(dict.fromkeys(
+                [*previous.get("supporting_claim_ids", []), *fact.get("supporting_claim_ids", [])]
+            ))
+            previous["supporting_points"] = list(dict.fromkeys(
+                [*previous.get("supporting_points", []), *fact.get("supporting_points", [])]
+            ))
+            previous_excerpt = previous.get("source_excerpt", "")
+            current_excerpt = fact.get("source_excerpt", "")
+            if previous_excerpt and current_excerpt:
+                previous["source_excerpt"] = _source_span(
+                    previous_excerpt + "\n" + current_excerpt,
+                    [previous_excerpt, current_excerpt],
+                ) or f"{previous_excerpt}\n{current_excerpt}"
+            continue
+        result.append(dict(fact))
+    return result
+
+
+def _split_obvious_conjoined_unit(fact: dict) -> list[dict]:
+    """Split two explicit predicates in one sentence, without product rules."""
+
+    # The source excerpt may cover several units.  Split only the unit the
+    # model actually proposed; otherwise an excerpt shared by two already
+    # separate units would be duplicated again.
+    source = _clean(fact.get("content"), 12000)
+    match = _CONJOINED_PREDICATE_RE.match(source)
+    if not match:
+        return [fact]
+    left = match.group("left").strip()
+    right = match.group("right").strip()
+    predicate = re.search(
+        r"\b(?:has|have|supports?|provides?|uses?|includes?|offers?|features?|is|are)\b|支持|具备|采用|提供|包括",
+        left,
+        re.IGNORECASE,
+    )
+    if not predicate:
+        return [fact]
+    subject = left[:predicate.start()].strip()
+    right_content = f"{subject} {right}".strip() if subject else right
+    claim_ids = list(fact.get("supporting_claim_ids", []))
+    return [
+        dict(fact, content=left.rstrip(".。") + ".", supporting_claim_ids=claim_ids),
+        dict(fact, content=right_content.rstrip(".。") + ".", supporting_claim_ids=claim_ids),
+    ]
+
+
+def _postprocess_semantic_units(facts: list[dict]) -> list[dict]:
+    expanded: list[dict] = []
+    for fact in facts:
+        expanded.extend(_split_obvious_conjoined_unit(fact))
+    return _consolidate_related_units(expanded)
+
+
 def _model_facts(
     content: str,
     llm_service=None,
@@ -259,7 +376,7 @@ def _model_facts(
             ):
                 log.warning("V2 semantic extraction contract invalid; keeping a provisional raw interpretation")
                 return _fallback_facts(content), True
-            return facts, False
+            return _postprocess_semantic_units(facts), False
         raw_facts = parsed.get("facts") if isinstance(parsed, dict) else None
         if not isinstance(raw_facts, list):
             raw_facts = [parsed] if isinstance(parsed, dict) and parsed.get("content") else []
@@ -285,7 +402,10 @@ def _model_facts(
             ):
                 log.warning("V2 bulk extraction coverage incomplete; segment remains failed")
                 return _fallback_facts(content), True
-            return facts, False
+            # Legacy ``facts`` responses already carry the model's intended
+            # unit boundaries.  Only repair a single legacy unit; merging an
+            # existing multi-fact response would undo its explicit split.
+            return (_postprocess_semantic_units(facts) if len(facts) == 1 else facts), False
     except Exception:
         log.exception("V2 learning understanding failed; keeping a provisional raw interpretation")
     return _fallback_facts(content), True
@@ -910,6 +1030,7 @@ def _plan_fact(
         " ".join(filter(None, (fact.get("entity_name"), fact.get("content")))),
         embedder=embedding_client,
         top_k=5,
+        same_model_only=True,
     )
     comparison = compare_and_ask(fact, candidates, llm_service)
     decision = comparison["decision"]

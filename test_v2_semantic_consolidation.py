@@ -3,7 +3,13 @@ import unittest
 from unittest.mock import patch
 
 from v2.bulk import extraction_coverage_is_complete, segment_bulk_text
-from v2.learning import UNDERSTANDING_SYSTEM_PROMPT, _model_facts, learn_turn
+from v2.learning import (
+    UNDERSTANDING_SYSTEM_PROMPT,
+    _consolidate_related_units,
+    _model_facts,
+    _postprocess_semantic_units,
+    learn_turn,
+)
 
 
 TANDEMVU_SOURCE = (
@@ -53,6 +59,41 @@ class SemanticConsolidationTest(unittest.TestCase):
         self.assertIn("一个句子可能有多个 units，多句话也可能只有一个 unit", UNDERSTANDING_SYSTEM_PROMPT)
         self.assertIn("每个被映射到 knowledge_unit 的 claim 的技术意义都必须体现在 canonical_fact 中", UNDERSTANDING_SYSTEM_PROMPT)
         self.assertNotIn("每个 facts 项只能包含一个事实", UNDERSTANDING_SYSTEM_PROMPT)
+        self.assertIn("一个句子不等于一个 unit", UNDERSTANDING_SYSTEM_PROMPT)
+
+    def test_postprocess_keeps_independent_conjoined_parameters_separate(self):
+        source = "TEST-PARAM-2026 has 8 MP resolution and supports PoE."
+        fact = {
+            "content": source,
+            "entity_name": "TEST-PARAM-2026",
+            "source_excerpt": source,
+            "supporting_claim_ids": ["c1"],
+        }
+        result = _postprocess_semantic_units([fact])
+        self.assertEqual([item["content"] for item in result], [
+            "TEST-PARAM-2026 has 8 MP resolution.",
+            "TEST-PARAM-2026 supports PoE.",
+        ])
+
+    def test_postprocess_merges_adjacent_same_feature_units(self):
+        units = [
+            {
+                "content": "TEST-OPTIC-2026 combines a fixed wide-angle view with a separate zoom channel.",
+                "entity_name": "TEST-OPTIC-2026",
+                "supporting_claim_ids": ["c1"],
+                "source_excerpt": "TEST-OPTIC-2026 combines a fixed wide-angle view with a separate zoom channel.",
+            },
+            {
+                "content": "The fixed wide-angle view remains available during zooming, reducing blind spots.",
+                "entity_name": "TEST-OPTIC-2026",
+                "supporting_claim_ids": ["c2"],
+                "source_excerpt": "The fixed wide-angle view remains available during zooming, reducing blind spots.",
+            },
+        ]
+        result = _consolidate_related_units(units)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["supporting_claim_ids"], ["c1", "c2"])
+        self.assertIn("reducing blind spots", result[0]["content"])
 
     def test_tandemvu_is_one_semantic_unit_with_multiple_claims(self):
         canonical = (
@@ -162,6 +203,17 @@ class SemanticConsolidationTest(unittest.TestCase):
 
         self.assertFalse(fallback)
         self.assertEqual([fact["entity_name"] for fact in facts], ["Model A", "Model B"])
+
+    def test_legacy_multi_fact_response_keeps_explicit_boundaries(self):
+        response = {
+            "facts": [
+                {"title": "Architecture", "content": "Guanlan has three layers.", "entity_name": "Guanlan"},
+                {"title": "Use", "content": "The task model serves a specific scenario.", "entity_name": "Guanlan"},
+            ]
+        }
+        facts, fallback = _model_facts("Guanlan has three layers. The task model serves a specific scenario.", SemanticExtractor(response))
+        self.assertFalse(fallback)
+        self.assertEqual(len(facts), 2)
 
     def test_marketing_claim_can_be_covered_without_creating_knowledge(self):
         source = "This dramatically improves security and provides an excellent user experience."

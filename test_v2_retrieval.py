@@ -77,6 +77,19 @@ class V2RetrievalTest(unittest.TestCase):
         self.assertEqual([item["id"] for item in result], [1])
         self.assertEqual(result[0]["retrieval_sources"], ["lexical"])
 
+    def test_explicit_model_does_not_retrieve_nearby_product_line(self):
+        conn = Connection([
+            row(1, "TandemVu keeps the wide scene visible.", "TandemVu", trust="user_confirmed"),
+            row(2, "TEST-TANDEM-X uses a dual-lens design.", "TEST-TANDEM-X", trust="user_confirmed"),
+        ])
+        result = retrieve_learning_knowledge(
+            conn,
+            "TEST-TANDEM-X uses a dual-lens design like TandemVu cameras",
+            top_k=3,
+            same_model_only=True,
+        )
+        self.assertEqual([item["id"] for item in result], [2])
+
     def test_stores_only_a_valid_openrouter_embedding(self):
         conn = Connection([])
         vector = [1.0] + [0.0] * (OPENROUTER_EMBEDDING_DIMENSIONS - 1)
