@@ -53,6 +53,13 @@ class V2UiTest(unittest.TestCase):
         self.assertIn("/api/v2/inbox/proposals/${encodeURIComponent(proposal.id)}", inbox)
         self.assertIn("proposal-editor-close", inbox)
 
+    def test_main_nav_links_to_chat_from_every_page(self):
+        for page in PAGES:
+            content = (ROOT / "templates" / page).read_text()
+            self.assertIn('href="/chat"', content, page)
+        chat = (ROOT / "templates" / "chat.html").read_text()
+        self.assertIn('class="active" href="/chat"', chat)
+
     def test_chat_is_a_read_only_internal_qa_page(self):
         content = (ROOT / "templates" / "chat.html").read_text()
         # Questions go to the answer service, never to learning ingestion.
