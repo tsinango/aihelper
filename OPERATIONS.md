@@ -287,6 +287,16 @@ pending 块，`{"reset_evidence_only": true}` 重开一轮（已完成/失败的
 Inbox 永远优先于文档任务（`pump_once` 回归覆盖）；崩溃后 processing 任务
 回 queued，按上下文检查点续跑，不重传整本文件。
 
+## V2 原文回读（Phase 5.1）
+
+`POST /api/v2/answers` 新增 `check_sources`（Chat“核对原文”按钮）：无合格
+Knowledge 时读合格原文回答；已有草稿时做一次核对，矛盾记
+`knowledge_document_conflict` 不自动选边。调用上限：一次初始生成加一次
+回读。原文资格：版本真实性已确认（上传时 `source_authenticity` 设为
+`official_vendor`/`confirmed_copy`，未核实只供人工看）、解析未失败、版本
+范围不冲突、块非待人工/失败；整块引用，超长章节转澄清不截断。
+回退：关闭 `check_sources` 入口即回到纯 Knowledge 问答；无关 schema 变更。
+
 ## 本机 Qwen 离线评测
 
 本机 Qwen3.5-2B/4B 是临时的影子评测模型，不由 systemd 托管，也不接收

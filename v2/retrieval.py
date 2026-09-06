@@ -13,6 +13,24 @@ TRUST_ORDER = {"official_source": 4, "user_confirmed": 4, "provisional": 2, "con
 # database CHECK in 013 plus the Phase 3.0 readiness predicate: active,
 # trusted, and backed by an accepted supports source.
 ANSWER_TRUST_VALUES = ("official_source", "user_confirmed")
+# Document versions whose raw text may be quoted by the source fallback.
+# Unverified uploads stay human-readable in the UI but never auto-quote.
+FALLBACK_AUTHENTICITY = ("official_vendor", "confirmed_copy")
+FALLBACK_VERSION_STATUSES = ("parsed", "learning", "complete")
+FALLBACK_BLOCK_STATES = ("pending", "evidence_only", "proposal", "knowledge")
+# Explicit "check the original" requests, matched case-insensitively.
+SOURCE_REQUEST_KEYWORDS = (
+    "原文", "核对", "核查", "手册", "表格", "第几页", "哪一页", "幻灯片",
+    "说明书", "截图", "界面",
+    "original", "source", "manual", "table", "page", "slide",
+    "провер", "оригинал", "таблиц", "руководств", "страниц",
+)
+# High-impact operations where a grounded draft gets one verification read.
+HIGH_RISK_KEYWORDS = (
+    "恢复出厂", "factory reset", "升级", "firmware", "прошив",
+    "密码", "password", "пароль", "反潜回", "联动",
+)
+MAX_FALLBACK_CHARS = 6000
 _TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9./()_-]*|[\u0400-\u04ff]+|[\u4e00-\u9fff]")
 _MODEL_RE = re.compile(r"(?=[A-Za-z0-9./()\-]*\d)[A-Za-z0-9][A-Za-z0-9./()\-]{2,}")
 _VERSION_RE = re.compile(r"V?\d+(?:[.,]\d+)+|\bBUILD\s*\d+|\b\d{6,8}\b", re.IGNORECASE)
@@ -447,3 +465,137 @@ def retrieve_for_answer(conn, question: str, *, embedder=None, top_k: int = 5,
         row["sources"] = sources.get(int(row["id"]), [])
         row.pop("embedding", None)
     return {"candidates": candidates, "diagnostics": diagnostics}
+
+
+def explicit_source_request(question: str) -> bool:
+    """Deterministic trigger: the engineer asks to check the original."""
+
+    folded = _text(question).casefold()
+    return any(keyword in folded for keyword in SOURCE_REQUEST_KEYWORDS)
+
+
+def high_risk_operation(question: str) -> bool:
+    """Deterministic trigger: high-impact operations get a verification read."""
+
+    folded = _text(question).casefold()
+    return any(keyword in folded for keyword in HIGH_RISK_KEYWORDS)
+
+
+def _version_applicability_satisfied(version: dict, query_models: list[str],
+                                     query_versions: list[str]) -> bool:
+    """Exclude versions whose stated scope contradicts the question.
+
+    Unstated scope on either side never excludes: unknown is not a mismatch.
+    """
+
+    applicability = version.get("applicability") or {}
+    if not isinstance(applicability, dict):
+        return True
+    for key, query_values in (("models", query_models), ("versions", query_versions)):
+        stated = applicability.get(key) or []
+        if not stated or not query_values:
+            continue
+        stated_keys = {_scope_key(str(item)) for item in stated if str(item).strip()}
+        query_keys = {_scope_key(str(item)) for item in query_values if str(item).strip()}
+        stated_keys.discard("")
+        query_keys.discard("")
+        if stated_keys and query_keys and stated_keys.isdisjoint(query_keys):
+            return False
+    return True
+
+
+def retrieve_document_evidence(conn, question: str, *, top_k: int = 3,
+                                document_version_id: int | None = None) -> dict:
+    """Lexical fallback over qualified raw document blocks.
+
+    Only raw block text is quoted -- never unreviewed LLM summaries.  A
+    version qualifies with confirmed authenticity, a non-failed parse, and
+    a scope that does not contradict the question.  Blocks under human
+    review or failed states never auto-quote.  Whole blocks only: callers
+    must refuse to silently truncate a block that does not fit.
+    """
+
+    question = _text(question)
+    top_k = max(1, min(int(top_k), 5))
+    diagnostics: dict[str, Any] = {
+        "query_models": [], "query_versions": [],
+        "scanned_version_ids": [], "excluded_versions": [],
+        "candidate_block_ids": [],
+    }
+    if not question:
+        return {"evidence": [], "diagnostics": diagnostics}
+    query_models = _scope_models(question)
+    query_versions = _version_tokens(question)
+    diagnostics["query_models"] = query_models
+    diagnostics["query_versions"] = query_versions
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT v.id, v.document_key, v.version_label, v.title,
+                   v.source_authenticity, v.status, v.applicability,
+                   b.id AS block_id, b.block_key, b.page_no, b.slide_no,
+                   b.block_type, b.section_path, b.processing_state,
+                   r.content AS block_text
+            FROM v2_document_blocks b
+            JOIN v2_document_versions v ON v.id=b.version_id
+            JOIN v2_raw_evidence r ON r.id=b.raw_evidence_id
+            WHERE v.source_authenticity = ANY(%s)
+              AND v.status = ANY(%s)
+              AND b.processing_state = ANY(%s)
+              AND r.content <> ''
+            """,
+            (list(FALLBACK_AUTHENTICITY), list(FALLBACK_VERSION_STATUSES),
+             list(FALLBACK_BLOCK_STATES)),
+        )
+        rows = [dict(row) for row in cur.fetchall()]
+    if document_version_id is not None:
+        rows = [row for row in rows if int(row["id"]) == int(document_version_id)]
+    versions: dict[int, dict] = {}
+    for row in rows:
+        versions.setdefault(int(row["id"]), {
+            "id": int(row["id"]), "document_key": str(row.get("document_key") or ""),
+            "version_label": str(row.get("version_label") or ""),
+            "title": str(row.get("title") or ""),
+            "source_authenticity": str(row.get("source_authenticity") or ""),
+            "status": str(row.get("status") or ""),
+            "applicability": row.get("applicability") or {},
+        })
+    diagnostics["scanned_version_ids"] = sorted(versions)
+    scored = []
+    for row in rows:
+        version = versions[int(row["id"])]
+        if not _version_applicability_satisfied(version, query_models, query_versions):
+            continue
+        section = " ".join(str(part) for part in (row.get("section_path") or []))
+        score = _lexical_score(question, {
+            "title": section, "content": str(row.get("block_text") or ""),
+            "entity_name": "",
+        })
+        if score <= 0:
+            continue
+        if row.get("slide_no") is not None:
+            locator = f"slide {int(row['slide_no'])}"
+        elif row.get("page_no") is not None:
+            locator = f"page {int(row['page_no'])}"
+        else:
+            locator = str(row.get("block_key") or "")
+        scored.append((score, {
+            "version_id": int(row["id"]),
+            "document_key": version["document_key"],
+            "version_label": version["version_label"],
+            "source_authenticity": version["source_authenticity"],
+            "block_id": int(row["block_id"]),
+            "block_key": str(row.get("block_key") or ""),
+            "locator": locator,
+            "section_path": [str(part) for part in (row.get("section_path") or [])],
+            "block_type": str(row.get("block_type") or ""),
+            "text": str(row.get("block_text") or ""),
+            "lexical_score": float(score),
+        }))
+    scored.sort(key=lambda pair: (pair[0], -pair[1]["block_id"]), reverse=True)
+    evidence = [item for _, item in scored[:top_k]]
+    diagnostics["candidate_block_ids"] = [item["block_id"] for item in evidence]
+    diagnostics["excluded_versions"] = sorted(
+        set(versions) - {item["version_id"] for _, item in scored}
+    )
+    return {"evidence": evidence, "diagnostics": diagnostics}

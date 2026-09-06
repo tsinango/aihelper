@@ -63,12 +63,12 @@ class V2UiTest(unittest.TestCase):
     def test_chat_correction_loop_contract(self):
         content = (ROOT / "templates" / "chat.html").read_text()
         # Correction widgets: edit, kind, submit, explicit confirm, retest,
-        # before/after compare card, and human verdict buttons.
+        # before/after compare card, human verdict buttons, source check.
         for marker in (
             "correct-toggle", "correct-text", "correct-kind",
             "correct-submit", "confirm-submit", "retest-submit",
             "retest-card", "verdict-pass", "verdict-fail",
-            "feedback-history", "feedback-line",
+            "feedback-history", "feedback-line", "check-sources",
         ):
             self.assertIn(marker, content)
         for kind in (

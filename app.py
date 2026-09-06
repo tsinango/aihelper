@@ -158,6 +158,7 @@ class V2InboxMessageIn(BaseModel):
 class V2AnswerIn(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
     context: dict | None = Field(default=None)
+    check_sources: bool = Field(default=False)
 
 
 class V2FeedbackIn(BaseModel):
@@ -2450,6 +2451,10 @@ def _v2_answer_response(run: dict) -> dict:
             "entity_name": item.get("entity_name", ""),
             "trust": item.get("trust", ""),
             "unit_kind": item.get("unit_kind", ""),
+            "evidence_type": item.get("evidence_type", "knowledge"),
+            "locator": item.get("locator", ""),
+            "document_version_id": item.get("document_version_id"),
+            "block_id": item.get("block_id"),
             "scope_models": item.get("scope_models", []),
             "scope_versions": item.get("scope_versions", []),
             "sources": item.get("sources", []),
@@ -2504,6 +2509,7 @@ def v2_create_answer(
             db_factory=db,
             llm_service=llm,
             embedding_client=embedder,
+            check_sources=bool(payload.check_sources),
         )
     except (AnswerConflict, AnswerInProgress) as exc:
         raise HTTPException(409, str(exc)) from exc

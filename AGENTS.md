@@ -19,7 +19,7 @@ The codebase is in transition between two generations:
   `/review/published`) where reviewers approve Telegram-derived support-case
   knowledge into published `verified_knowledge`. Only published knowledge may
   answer customers; historical case memory is recall/reviewer evidence only.
-- **V2** (Phases 1–4.3 implemented): a new Inbox-first
+- **V2** (Phases 1–5.1 implemented): a new Inbox-first
   learning loop under `v2/` with its own `v2_`-prefixed tables, pages
   (`/inbox`, `/knowledge`, `/documents`, `/chat`) and `/api/v2/*` routes.
   Knowledge carries one of four trust values (`official_source`,
@@ -79,6 +79,9 @@ systemd, batch jobs, review workflow), `TECHNICAL_STATUS_AND_REMEDIATION.md`
   `retrieve_for_answer()` is the separate eligibility-gated answer entry
   point — never reuse `retrieve_learning_knowledge()` for answers;
   document units additionally require `validation_status='validated'`).
+  `retrieval.py` also exposes `retrieve_document_evidence()` (Phase 5.1
+  bounded fallback over qualified raw blocks; `POST /api/v2/answers` takes
+  `check_sources`).
 - `worker.py` — Inbox worker entrypoint polled by `aihelper-inbox-worker`; it
   claims durable `v2_inbox_processing_jobs` rows only.
 - `templates/` — V2 pages (`inbox.html`, `knowledge.html`, `documents.html`,

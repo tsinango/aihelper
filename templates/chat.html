@@ -50,6 +50,7 @@
         <div id="correct-box" class="correct-box">
           <div class="correct-row">
             <button id="correct-toggle" type="button">纠正答案</button>
+            <button id="check-sources" type="button" title="用合格原文再核对一次当前答案">核对原文</button>
             <button id="feedback-history" type="button" title="查看该回答的全部历史纠正">历史纠正</button>
             <span id="verdict-view" class="meta"></span>
           </div>
@@ -187,7 +188,10 @@
         const row = document.createElement('li');
         const title = document.createElement('div');
         title.className = 'src-title';
-        title.textContent = `K${value(item, 'knowledge_id')} · ${value(item, 'title') || '（无标题）'}`;
+        const kid = value(item, 'knowledge_id');
+        title.textContent = kid != null && kid !== ''
+          ? `K${kid} · ${value(item, 'title') || '（无标题）'}`
+          : `原文 · ${value(item, 'locator') || value(item, 'title') || '（文档块）'}`;
         row.append(title);
         const meta = document.createElement('div');
         meta.className = 'src-meta';
@@ -253,6 +257,27 @@
       } finally {
         button.disabled = false;
         input.focus();
+      }
+    }
+
+    async function checkSources() {
+      const run = feedbackState.run;
+      if (!run) return;
+      const question = String(run.question || input.value.trim() || '');
+      if (!question) return;
+      clearError();
+      try {
+        const data = await api('/api/v2/answers', {
+          method: 'POST',
+          headers: {'Idempotency-Key': uuid()},
+          body: JSON.stringify({question, check_sources: true}),
+        });
+        renderAnswer(data);
+        const trace = data.retrieval_trace || {};
+        const doc = trace.document || {};
+        feedbackLine(doc.trigger ? `原文核对（${doc.trigger}）：${(doc.candidate_block_ids || []).length} 块原文参与。` : '');
+      } catch (error) {
+        showError(error.message);
       }
     }
 
@@ -332,7 +357,10 @@
       box.replaceChildren();
       for (const item of (Array.isArray(data.citations) ? data.citations : [])) {
         const row = document.createElement('li');
-        row.textContent = `K${value(item, 'knowledge_id')} · ${value(item, 'title') || '（无标题）'}`;
+        const kid = value(item, 'knowledge_id');
+        row.textContent = kid != null && kid !== ''
+          ? `K${kid} · ${value(item, 'title') || '（无标题）'}`
+          : `原文 · ${value(item, 'locator') || value(item, 'title') || '（文档块）'}`;
         box.append(row);
       }
       $('retest-meta').textContent =
@@ -425,6 +453,7 @@
       }
     });
     $('correct-submit').addEventListener('click', submitFeedback);
+    $('check-sources').addEventListener('click', checkSources);
     $('confirm-submit').addEventListener('click', confirmExperience);
     $('retest-submit').addEventListener('click', retestAnswer);
     $('verdict-pass').addEventListener('click', () => sendVerdict('pass'));
