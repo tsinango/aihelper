@@ -36,6 +36,31 @@ def db():
     return psycopg.connect(os.environ["DATABASE_URL"], row_factory=dict_row)
 
 
+def pump_once(*, db_factory, run_inbox_job, run_document_job, llm_configured: bool) -> str:
+    """Run a single worker iteration; Inbox always beats document jobs.
+
+    Returns ``'inbox'``, ``'document'``, or ``'idle'``.  Extracted so the
+    interleave quota (at most one document step per iteration, only when no
+    Inbox job waits) is covered by a regression test instead of inspection.
+    """
+
+    with db_factory() as conn:
+        job_ids = list_queued_job_ids(conn, limit=1)
+    if job_ids:
+        run_inbox_job(job_ids[0])
+        return "inbox"
+    # Learn steps need the model; without it only parse locally so learn
+    # jobs never burn their retry budget on a dead client.
+    stages = ("parse", "learn") if llm_configured else ("parse",)
+    with db_factory() as conn:
+        document_job = claim_document_job(conn, stages)
+        conn.commit()
+    if document_job:
+        run_document_job(int(document_job["id"]))
+        return "document"
+    return "idle"
+
+
 def _heartbeat_loop(stop_event: threading.Event) -> None:
     """Keep liveness independent from a potentially long LLM request."""
     while not stop_event.is_set():
@@ -108,20 +133,12 @@ def main() -> None:
         recover_document_jobs(db_factory=db, process_job=run_document_job)
         while True:
             try:
-                with db() as conn:
-                    job_ids = list_queued_job_ids(conn, limit=1)
-                if job_ids:
-                    run_job(job_ids[0])
-                    continue
-                # Learn steps need the model; without it only parse locally so
-                # learn jobs never burn their retry budget on a dead client.
-                stages = ("parse", "learn") if llm is not None else ("parse",)
-                with db() as conn:
-                    document_job = claim_document_job(conn, stages)
-                    conn.commit()
-                if document_job:
-                    run_document_job(int(document_job["id"]))
-                else:
+                ran = pump_once(
+                    db_factory=db, run_inbox_job=run_job,
+                    run_document_job=run_document_job,
+                    llm_configured=llm is not None,
+                )
+                if ran == "idle":
                     time.sleep(1)
             except Exception:
                 log.exception("Inbox worker loop failed; retrying")

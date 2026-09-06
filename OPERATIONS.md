@@ -277,6 +277,16 @@ Chat 回答卡新增纠正入口：`POST /api/v2/answers/{id}/feedback`
 提炼入口本身与模型无关，验收时可用任一可用免费模型手动提炼，结果以
 `prompt_version` 记录为准。
 
+## V2 全文覆盖（Phase 4.3）
+
+`GET /api/v2/documents/versions/{id}/coverage` 返回各状态块数、未完成块
+与任务状态；`complete` 仅表示每块有去向且无开放提炼任务。提炼后未被引用
+的文本块标 `evidence_only`（保留为证据）；`POST .../learn` 默认只排队
+pending 块，`{"reset_evidence_only": true}` 重开一轮（已完成/失败的提炼
+任务行会被新一轮代替，结果已在提案中故不丢失）。worker 每次迭代只做一步，
+Inbox 永远优先于文档任务（`pump_once` 回归覆盖）；崩溃后 processing 任务
+回 queued，按上下文检查点续跑，不重传整本文件。
+
 ## 本机 Qwen 离线评测
 
 本机 Qwen3.5-2B/4B 是临时的影子评测模型，不由 systemd 托管，也不接收

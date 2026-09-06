@@ -441,14 +441,42 @@ def save_unit_proposals(
 # -- learn jobs ------------------------------------------------------------------
 
 
-def queue_learn_jobs(conn, version_id: int) -> list[dict]:
-    """Create one queued learn job per context; idempotent per context key."""
+def queue_learn_jobs(conn, version_id: int, *, reset_evidence_only: bool = False) -> list[dict]:
+    """Create one queued learn job per context; idempotent per context key.
+
+    Only ``pending`` blocks auto-queue; ``needs_review`` stays human-owned.
+    With ``reset_evidence_only``, blocks previously shelved as evidence_only
+    return to pending first so a version can be relearned after better
+    contexts or model availability.
+    """
 
     from v2.documents import get_blocks
 
     version = get_version(conn, version_id)
     if version is None:
         raise DocumentLearnNotFound(f"V2 document version {int(version_id)} was not found")
+    if reset_evidence_only:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE v2_document_blocks
+                SET processing_state='pending', state_reason='',
+                    updated_at=CURRENT_TIMESTAMP
+                WHERE version_id=%s AND processing_state='evidence_only'
+                """,
+                (int(version_id),),
+            )
+            # A fresh pass needs fresh job rows: drop the finished learn
+            # steps of the reset version (their results already live in
+            # proposals).  Queued/processing jobs are never disturbed.
+            cur.execute(
+                """
+                DELETE FROM v2_document_jobs
+                WHERE version_id=%s AND stage='learn'
+                  AND status IN ('completed', 'failed')
+                """,
+                (int(version_id),),
+            )
     blocks = get_blocks(conn, version_id)
     rows = [
         {
@@ -459,7 +487,7 @@ def queue_learn_jobs(conn, version_id: int) -> list[dict]:
             "evidence_text": str(block.get("evidence_text") or ""),
         }
         for block in blocks
-        if str(block.get("processing_state") or "") in ("pending", "needs_review")
+        if str(block.get("processing_state") or "") == "pending"
     ]
     contexts = build_learning_contexts(rows)
     jobs = []

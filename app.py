@@ -97,6 +97,7 @@ from v2.documents import (
     latest_document_job,
     list_versions,
     retry_document_job,
+    version_coverage,
     version_file_path,
 )
 from v2.document_learning import (
@@ -2325,21 +2326,45 @@ def _v2_document_proposal_view(proposal: dict) -> dict:
 
 
 @app.post("/api/v2/documents/versions/{version_id}/learn")
-def v2_learn_document_version(version_id: int, x_api_key: str | None = Header(None)):
+def v2_learn_document_version(
+    version_id: int,
+    body: dict = Body(default={}),
+    x_api_key: str | None = Header(None),
+):
     """Queue one learn job per section context; the worker extracts units.
 
     Idempotent per context key: re-posting after a crash only queues the
     contexts still missing jobs.  Nothing becomes answerable until an
-    engineer confirms each proposal below.
+    engineer confirms each proposal below.  Pass
+    ``{"reset_evidence_only": true}`` to relearn blocks previously shelved
+    as evidence_only.
     """
 
     auth(x_api_key)
+    reset = bool(isinstance(body, dict) and (body or {}).get("reset_evidence_only"))
     try:
         with db() as conn:
-            jobs = queue_learn_jobs(conn, int(version_id))
+            jobs = queue_learn_jobs(conn, int(version_id), reset_evidence_only=reset)
     except DocumentLearnNotFound as exc:
         raise HTTPException(404, str(exc)) from exc
     return json_safe({"version_id": int(version_id), "queued": jobs, "total": len(jobs)})
+
+
+@app.get("/api/v2/documents/versions/{version_id}/coverage")
+def v2_document_coverage(version_id: int, x_api_key: str | None = Header(None)):
+    """Whole-document disposition: counts by state plus unfinished blocks.
+
+    ``complete`` means every block has a destination and no learn job is
+    still open -- never a claim about understanding quality.
+    """
+
+    auth(x_api_key)
+    with db() as conn:
+        version = get_version(conn, int(version_id))
+        if not version:
+            raise HTTPException(404, f"V2 document version {int(version_id)} was not found")
+        coverage = version_coverage(conn, int(version_id))
+    return json_safe(coverage)
 
 
 @app.get("/api/v2/documents/versions/{version_id}/proposals")

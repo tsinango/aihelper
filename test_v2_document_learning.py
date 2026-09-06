@@ -252,7 +252,7 @@ class DocumentLearnApiTest(unittest.TestCase):
         from app import v2_document_proposals, v2_learn_document_version
 
         self._patch("queue_learn_jobs",
-                    lambda conn, _: [{"job_id": 3, "context_key": "Guide"}])
+                    lambda conn, *_args, **_kwargs: [{"job_id": 3, "context_key": "Guide"}])
         queued = v2_learn_document_version(9, x_api_key="test-key")
         self.assertEqual(queued["total"], 1)
         self.assertEqual(queued["queued"][0]["context_key"], "Guide")

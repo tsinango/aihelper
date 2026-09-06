@@ -112,6 +112,9 @@ def _process_learn_step(job: dict, *, db_factory, llm_service) -> dict:
         proposals = save_unit_proposals(
             conn, int(version["id"]), str(context.get("context_key") or ""), valid,
         )
+        _mark_unused_blocks_evidence_only(
+            conn, int(version["id"]), context.get("blocks") or [], proposals,
+        )
         conn.commit()
     for error in errors:
         log.warning("document extraction rejected %s: %s",
@@ -126,6 +129,42 @@ def _process_learn_step(job: dict, *, db_factory, llm_service) -> dict:
         "proposals": len(proposals),
         "rejected": len(errors),
     }
+
+
+def _mark_unused_blocks_evidence_only(conn, version_id: int, context_blocks: list,
+                                        proposals: list) -> None:
+    """Blocks that taught nothing stay as evidence with a reason.
+
+    Contexts partition blocks, so an uncited block will never meet another
+    extraction; leaving it pending would fake unfinished work forever.
+    """
+
+    cited = set()
+    for proposal in proposals:
+        details = proposal.get("details_json") or {}
+        for source in details.get("sources") or []:
+            try:
+                cited.add(int(source.get("block_id")))
+            except (TypeError, ValueError):
+                continue
+    unused = [
+        int(item["block_id"]) for item in context_blocks
+        if int(item["block_id"]) not in cited and str(item.get("text") or "").strip()
+    ]
+    if not unused:
+        return
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE v2_document_blocks
+            SET processing_state='evidence_only',
+                state_reason='no unit extracted; kept as evidence',
+                updated_at=CURRENT_TIMESTAMP
+            WHERE version_id=%s AND id = ANY(%s)
+              AND processing_state='pending'
+            """,
+            (int(version_id), unused),
+        )
 
 
 def _maybe_complete_version(version_id: int, *, db_factory) -> None:

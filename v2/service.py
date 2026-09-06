@@ -657,7 +657,7 @@ def edit_knowledge(
         updated = _dict(cur.fetchone())
     if not updated:
         raise V2NotFound(f"active V2 Knowledge {knowledge_id} was not found")
-    if content_changed:
+    if content_changed or applicability_changed or details_changed:
         after = _knowledge_snapshot(updated)
         after["entity_id"] = old_snapshot["entity_id"]
         _write_knowledge_history(conn, int(knowledge_id), "edit", old_snapshot, after)

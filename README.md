@@ -33,7 +33,11 @@ Phase 4.1 已实现结构化 PDF/PPTX 接入：文件版本不可覆盖，页/�
 相关幻灯片一次提炼多个完整技术单元（fact/procedure/rule/experience），
 引用与标识符由代码校验，提案经人工确认后成为 validated 可回答 Knowledge，
 回答资格要求文档单元 `validation_status='validated'`。
-下一阶段是 Phase 4.3 全文覆盖与质量（尚未开始）。
+Phase 4.3 已实现全文覆盖：每块有明确去向（knowledge/proposal/
+evidence_only/needs_review/failed），覆盖率接口与页面只报“有去向比例”，
+不断言理解正确率；worker 单次迭代 inbox 优先可测，崩溃后按上下文检查点
+续跑，重学幂等、无重复提案。
+下一阶段是 Phase 5 原文回读与文档更新（尚未开始）。
 
 ```text
 Raw Evidence

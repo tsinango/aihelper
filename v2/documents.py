@@ -790,6 +790,65 @@ def latest_document_job(conn, version_id: int, stage: str = "parse") -> dict | N
     return dict(row) if row else None
 
 
+def version_coverage(conn, version_id: int) -> dict:
+    """Whole-document disposition: every block states its destination.
+
+    ``complete`` means every block has a destination (knowledge, proposal,
+    evidence_only, needs_review) and no learn job is still open -- never a
+    claim about understanding quality.
+    """
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT processing_state, count(*) AS n
+            FROM v2_document_blocks
+            WHERE version_id=%s
+            GROUP BY processing_state
+            """,
+            (int(version_id),),
+        )
+        states = {str(row["processing_state"]): int(row["n"]) for row in cur.fetchall()}
+        cur.execute(
+            """
+            SELECT id, block_key, page_no, slide_no, block_type,
+                   processing_state, state_reason
+            FROM v2_document_blocks
+            WHERE version_id=%s AND processing_state IN ('pending', 'parse_failed', 'learn_failed')
+            ORDER BY ord, id
+            """,
+            (int(version_id),),
+        )
+        unfinished = [dict(row) for row in cur.fetchall()]
+        cur.execute(
+            """
+            SELECT stage, status, count(*) AS n
+            FROM v2_document_jobs
+            WHERE version_id=%s
+            GROUP BY stage, status
+            """,
+            (int(version_id),),
+        )
+        jobs = [
+            {"stage": str(row["stage"]), "status": str(row["status"]), "count": int(row["n"])}
+            for row in cur.fetchall()
+        ]
+    total = sum(states.values())
+    with_destination = total - states.get("pending", 0)
+    return {
+        "version_id": int(version_id),
+        "total_blocks": total,
+        "by_state": states,
+        "with_destination": with_destination,
+        "unfinished_blocks": unfinished,
+        "jobs": jobs,
+        "complete": not unfinished and not any(
+            item["stage"] == "learn" and item["status"] in ("queued", "processing")
+            for item in jobs
+        ),
+    }
+
+
 def claim_document_job(conn, stages: tuple[str, ...] = ("parse",)) -> dict | None:
     """Claim one due job; the worker holds no lock across parsing."""
 
@@ -916,5 +975,6 @@ __all__ = [
     "save_parsed_blocks",
     "storage_dir",
     "unfinished_document_job_ids",
+    "version_coverage",
     "version_file_path",
 ]
