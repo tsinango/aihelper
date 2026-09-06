@@ -255,9 +255,12 @@ retrieve = retrieve_learning_knowledge
 def _answer_eligible_rows(conn) -> list[dict]:
     """Active, trusted Knowledge backed by an accepted supports source.
 
-    This is the same predicate the Phase 3.0 readiness check uses.  Rows with
-    an accepted contradicting source link are additionally excluded: a known
-    conflict must never silently support an answer draft.
+    This is the same predicate the Phase 3.0 readiness check uses.  The
+    supporting raw evidence itself must still be active: superseded or
+    redacted evidence cannot ground an answer even when the source link was
+    accepted earlier.  Rows with an accepted contradicting source link are
+    additionally excluded: a known conflict must never silently support an
+    answer draft.
     """
 
     with conn.cursor() as cur:
@@ -273,10 +276,12 @@ def _answer_eligible_rows(conn) -> list[dict]:
               AND k.trust IN ('official_source', 'user_confirmed')
               AND EXISTS (
                     SELECT 1 FROM v2_knowledge_sources s
+                    JOIN v2_raw_evidence r ON r.id=s.raw_evidence_id
                     WHERE s.knowledge_id=k.id
                       AND s.active=TRUE
                       AND s.relation='supports'
                       AND s.resolution='accepted'
+                      AND r.evidence_status='active'
                   )
               AND NOT EXISTS (
                     SELECT 1 FROM v2_knowledge_sources c
@@ -291,7 +296,11 @@ def _answer_eligible_rows(conn) -> list[dict]:
 
 
 def _answer_sources(conn, knowledge_ids: list[int]) -> dict[int, list[dict]]:
-    """Accepted supports sources with raw-evidence locators, keyed by Knowledge."""
+    """Accepted supports sources with raw-evidence locators, keyed by Knowledge.
+
+    Only sources whose raw evidence is still active are returned: excerpts of
+    superseded or redacted evidence must never surface in an answer snapshot.
+    """
 
     result: dict[int, list[dict]] = {}
     if not knowledge_ids:
@@ -309,6 +318,7 @@ def _answer_sources(conn, knowledge_ids: list[int]) -> dict[int, list[dict]]:
               AND s.active=TRUE
               AND s.relation='supports'
               AND s.resolution='accepted'
+              AND r.evidence_status='active'
             ORDER BY s.knowledge_id, s.id
             """,
             (list({int(item) for item in knowledge_ids}),),

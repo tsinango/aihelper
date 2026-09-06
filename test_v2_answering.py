@@ -171,7 +171,7 @@ class FakeEmbedder:
         raise AssertionError("no vector expected in these tests")
 
 
-def answered_json(answer="Ответ на русском языке.", indexes=(0,)):
+def answered_json(answer="这是中文答案。", indexes=(0,)):
     return json.dumps({
         "status": "answered", "answer": answer,
         "clarifying_question": "", "source_indexes": list(indexes),
@@ -201,7 +201,7 @@ class V2AnsweringTest(unittest.TestCase):
             [knowledge_row(1, "F-NR-208E/2 安装", "F-NR-208E/2 支持标准 19 英寸机架安装", "F-NR-208E/2")],
             [knowledge_source(1)],
         )
-        llm = FakeLLM([answered_json("F-NR-208E/2 устанавливается в стандартную 19-дюймовую стойку.")])
+        llm = FakeLLM([answered_json("F-NR-208E/2 安装在标准 19 英寸机架上。")])
         result = self.ask("F-NR-208E/2 如何安装在机架上？", llm_service=llm)
         self.assertEqual(result["answer_status"], "answered")
         self.assertEqual(result["execution_status"], "completed")
@@ -248,7 +248,7 @@ class V2AnsweringTest(unittest.TestCase):
         self.seed([knowledge_row(
             1, "升级到 5.7", "将 IDS-TCM203-A 从 5.6.11 升级到 5.7 版本", "IDS-TCM203-A",
         )])
-        llm = FakeLLM([answered_json("Обновите IDS-TCM203-A до версии 5.7.")])
+        llm = FakeLLM([answered_json("将 IDS-TCM203-A 升级到 5.7 版本。")])
         result = self.ask("IDS-TCM203-A 升级失败怎么办？", llm_service=llm)
         # The question names the model but no version, so version exclusion
         # cannot fire; the single-scope candidate goes to the grounded LLM.
@@ -338,7 +338,7 @@ class V2AnsweringTest(unittest.TestCase):
             [knowledge_row(1, "F-NR-208E/2 安装", "F-NR-208E/2 支持机架安装", "F-NR-208E/2")],
             [knowledge_source(1)],
         )
-        llm = FakeLLM([answered_json("F-NR-208E/2 устанавливается в стойку.")])
+        llm = FakeLLM([answered_json("F-NR-208E/2 安装在机架上。")])
         result = self.ask(
             "F-NR-208E/2 如何安装？", llm_service=llm,
             embedding_client=FakeEmbedder(error=RuntimeError("embedding down")),
@@ -351,7 +351,7 @@ class V2AnsweringTest(unittest.TestCase):
             [knowledge_row(1, "F-NR-208E/2 安装", "F-NR-208E/2 支持机架安装", "F-NR-208E/2")],
             [knowledge_source(1)],
         )
-        llm = FakeLLM([answered_json("F-NR-208E/2 устанавливается в стойку.")])
+        llm = FakeLLM([answered_json("F-NR-208E/2 安装在机架上。")])
         first = self.ask("F-NR-208E/2 如何安装？", llm_service=llm, idempotency_key="key-1")
         second = self.ask("F-NR-208E/2 如何安装？", llm_service=llm, idempotency_key="key-1")
         self.assertFalse(first["duplicate"])
@@ -381,7 +381,7 @@ class V2AnsweringTest(unittest.TestCase):
             [knowledge_row(1, "F-NR-208E/2 安装", "F-NR-208E/2 支持标准 19 英寸机架安装", "F-NR-208E/2")],
             [knowledge_source(1)],
         )
-        llm = FakeLLM([answered_json("F-NR-208E/2 устанавливается в стойку.")])
+        llm = FakeLLM([answered_json("F-NR-208E/2 安装在机架上。")])
         result = self.ask("F-NR-208E/2 如何安装？", llm_service=llm)
         # Later Knowledge edits must not rewrite the stored snapshot.
         self.state["knowledge"][0]["content"] = "F-NR-208E/2 需要特殊导轨安装"
@@ -398,7 +398,7 @@ class V2AnsweringTest(unittest.TestCase):
             [knowledge_row(1, "T1000 编码", "T1000 支持 H.265 编码 设置方法", "T1000")],
             [knowledge_source(1)],
         )
-        llm = FakeLLM([answered_json("Включите H.265 в настройках T1000.")])
+        llm = FakeLLM([answered_json("在 T1000 设置中开启 H.265 编码。")])
         result = self.ask("H.265 编码 设置 方法", llm_service=llm)
         self.assertEqual(result["answer_status"], "answered")
         self.assertIn("T1000", result["answer_text"])
@@ -415,7 +415,7 @@ class V2AnsweringTest(unittest.TestCase):
         # The model cites only the generic first-ranked candidate: no T1000
         # qualifier from the uncited scoped candidate may leak in.
         body = json.dumps({
-            "status": "answered", "answer": "Перед установкой отключите питание.",
+            "status": "answered", "answer": "安装前请断电。",
             "clarifying_question": "", "source_indexes": [0], "confidence": 0.8,
         }, ensure_ascii=False)
         llm = FakeLLM([body])
@@ -437,6 +437,27 @@ class V2AnswerDecisionTest(unittest.TestCase):
         )
         self.assertEqual(decision["status"], "unsupported")
         self.assertEqual(decision["reason_code"], "citation_invalid")
+
+    def test_chinese_answer_matches_chinese_question(self):
+        body = json.dumps({
+            "status": "answered", "answer": "可以。T1000 支持机架安装。",
+            "clarifying_question": "", "source_indexes": [0], "confidence": 0.9,
+        }, ensure_ascii=False)
+        decision = normalize_answer_decision(body, [{"index": 0}], "zh")
+        self.assertEqual(decision["status"], "answered")
+
+    def test_russian_answer_rejected_for_chinese_question(self):
+        decision = normalize_answer_decision(
+            answered_json(answer="Ответ на русском.", indexes=(0,)), [{"index": 0}], "zh",
+        )
+        self.assertEqual(decision["status"], "unsupported")
+
+    def test_expected_language_defaults_to_russian(self):
+        from v2.answering import expected_answer_language
+        self.assertEqual(expected_answer_language("???"), "ru")
+        self.assertEqual(expected_answer_language("如何安装？"), "zh")
+        self.assertEqual(expected_answer_language("Как установить?"), "ru")
+        self.assertEqual(expected_answer_language("IDS-TCM203-A 升级失败怎么办？"), "zh")
 
     def test_triage_prefers_version_question_over_silence(self):
         diagnostics = {

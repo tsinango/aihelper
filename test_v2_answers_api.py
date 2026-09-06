@@ -143,7 +143,7 @@ def knowledge_source(knowledge_id):
 
 def answered_json():
     return json.dumps({
-        "status": "answered", "answer": "F-NR-208E/2 устанавливается в стойку.",
+        "status": "answered", "answer": "F-NR-208E/2 安装在机架上。",
         "clarifying_question": "", "source_indexes": [0], "confidence": 0.9,
     }, ensure_ascii=False)
 

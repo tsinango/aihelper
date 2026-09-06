@@ -219,10 +219,12 @@ def check_knowledge_readiness(conn, cases: list[dict], samples_by_key: dict[str,
                 SELECT k.id, k.trust, k.active,
                        EXISTS (
                            SELECT 1 FROM v2_knowledge_sources s
+                           JOIN v2_raw_evidence r ON r.id = s.raw_evidence_id
                            WHERE s.knowledge_id = k.id
                              AND s.active = TRUE
                              AND s.relation = 'supports'
                              AND s.resolution = 'accepted'
+                             AND r.evidence_status = 'active'
                        ) AS has_accepted_source
                 FROM v2_knowledge k
                 WHERE k.id = ANY(%s)

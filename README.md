@@ -83,7 +83,7 @@ Knowledge Graph editor 和 Telegram V2 接入不会进入当前 V2 主导航或�
 - `/documents`：查看现有文档资产；文档学习管道仍未作为 V2 Learning 主入口。
 - `/chat`：内部工程师问答页（Internal engineer draft）。`POST /api/v2/answers`
   只从 eligible Knowledge（active + official_source/user_confirmed + accepted
-  supports 来源 + 无已知型号/版本冲突）生成答案草稿、澄清或拒答，并保存
+  supports 来源且来源证据仍 active + 无已知型号/版本冲突）生成答案草稿、澄清或拒答，并保存
   `v2_answer_runs`（含 evidence snapshot）；`GET /api/v2/answers/{id}` 查看
   历史。回答只读 Knowledge，不学习、不产生 Experience、不修改 Knowledge。
   学习资料仍进入 Inbox。

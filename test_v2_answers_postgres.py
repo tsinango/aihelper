@@ -107,15 +107,16 @@ class V2AnswersPostgresTest(unittest.TestCase):
                 except Exception:
                     return None
 
-    def _evidence(self, label="evidence") -> int:
+    def _evidence(self, label="evidence", status="active") -> int:
         row = self._write(
             """
             INSERT INTO v2_raw_evidence(
-                evidence_type, author_role, content, source_label, source_locator
-            ) VALUES('user_input', 'product_expert', %s, %s, %s)
+                evidence_type, author_role, content, source_label, source_locator,
+                evidence_status
+            ) VALUES('user_input', 'product_expert', %s, %s, %s, %s)
             RETURNING id
             """,
-            (f"{self.tag} {label} 内容", f"{self.tag}-{label}", f"locator-{self.tag}"),
+            (f"{self.tag} {label} 内容", f"{self.tag}-{label}", f"locator-{self.tag}", status),
         )
         assert row is not None
         return int(row["id"])
@@ -189,6 +190,27 @@ class V2AnswersPostgresTest(unittest.TestCase):
             self.assertNotIn(excluded_id, result["diagnostics"]["eligible_ids"])
         self.assertEqual(result["candidates"][0]["sources"][0]["source_locator"], f"locator-{self.tag}")
 
+    def test_inactive_raw_evidence_is_not_answer_eligible(self):
+        superseded_only = self._knowledge("T2468 安装", "T2468 支持机架安装", "T2468")
+        self._source(superseded_only, self._evidence("sup", status="superseded"))
+        redacted_only = self._knowledge("T1357 安装", "T1357 支持机架安装", "T1357")
+        self._source(redacted_only, self._evidence("red", status="redacted"))
+        mixed = self._knowledge("T8642 安装", "T8642 支持机架安装", "T8642")
+        self._source(mixed, self._evidence("good"), excerpt="可用摘录")
+        self._source(mixed, self._evidence("stale", status="superseded"), excerpt="过期摘录")
+        result = retrieve_for_answer(self.conn, "T2468 T1357 T8642 如何安装？")
+        ids = [int(item["id"]) for item in result["candidates"]]
+        self.assertEqual(ids, [mixed])
+        self.assertNotIn(superseded_only, result["diagnostics"]["eligible_ids"])
+        self.assertNotIn(redacted_only, result["diagnostics"]["eligible_ids"])
+        # Mixed Knowledge stays eligible through its good source, but the
+        # superseded excerpt must never surface in answer evidence.
+        self.assertIn(mixed, result["diagnostics"]["eligible_ids"])
+        sources = retrieve_for_answer(self.conn, "T8642 如何安装？")["candidates"][0]["sources"]
+        self.assertEqual(len(sources), 1)
+        self.assertIn("可用摘录", sources[0]["excerpt"])
+        self.assertNotIn("过期摘录", sources[0]["excerpt"])
+
     def test_embedding_scan_works_over_pgvector(self):
         knowledge_id = self._eligible("T5678 安装", "T5678 支持机架安装", "T5678")
         stored = store_knowledge_embedding(
@@ -204,7 +226,7 @@ class V2AnswersPostgresTest(unittest.TestCase):
 
     def test_answer_run_persists_with_snapshot(self):
         knowledge_id = self._eligible("T9012 安装", "T9012 支持机架安装", "T9012")
-        llm = FakeLLM([answered_json("T9012 устанавливается в стандартную стойку.")])
+        llm = FakeLLM([answered_json("T9012 安装在标准机架上。")])
         result = answer_question(
             "T9012 如何安装在机架上？",
             idempotency_key=f"{self.tag}-run-1",
@@ -223,7 +245,7 @@ class V2AnswersPostgresTest(unittest.TestCase):
 
     def test_snapshot_survives_a_real_knowledge_edit(self):
         knowledge_id = self._eligible("T3456 安装", "T3456 支持机架安装", "T3456")
-        llm = FakeLLM([answered_json("T3456 устанавливается в стойку.")])
+        llm = FakeLLM([answered_json("T3456 安装在机架上。")])
         factory = self._factory
         result = answer_question(
             "T3456 如何安装？",
@@ -243,7 +265,7 @@ class V2AnswersPostgresTest(unittest.TestCase):
 
     def test_duplicate_key_returns_stored_run(self):
         self._eligible("T7890 安装", "T7890 支持机架安装", "T7890")
-        llm = FakeLLM([answered_json("T7890 устанавливается в стойку.")])
+        llm = FakeLLM([answered_json("T7890 安装在机架上。")])
         factory = self._factory
         first = answer_question(
             "T7890 如何安装？", idempotency_key=f"{self.tag}-run-3",
