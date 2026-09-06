@@ -308,6 +308,15 @@ Knowledge 时读合格原文回答；已有草稿时做一次核对，矛盾记
 （pending/validated/needs_revalidation，记 `revalidate` 历史）。
 回退：删除版本前驱关联（置空）即回到无链状态；知识行不受影响。
 
+## V2 失败分类与召回门限（Phase 5.3）
+
+`GET /api/v2/failures?days=7&limit=50` 返回近期未判定失败的六类划分与默认
+动作，外加召回门限进度；`evaluate_v2.py --database-url ... --failure-report
+<path>` 写同口径 JSON。给漏召回问题登记 `expected_knowledge_ids`
+（`POST .../feedback` 仅 `retrieval_failure` 可带）：只有被登记且当前仍合格
+的才计入门限，满 10 例才允许动检索（当前 0/10，检索保持不动）。
+失败分类只标注不建知识；连续 5 个工作日、20+ 真实问题的试用仍需人工完成。
+
 ## 本机 Qwen 离线评测
 
 本机 Qwen3.5-2B/4B 是临时的影子评测模型，不由 systemd 托管，也不接收

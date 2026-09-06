@@ -81,9 +81,11 @@ from v2.feedback import (
     count_unresolved_feedback,
     create_feedback,
     get_feedback,
+    list_failures,
     list_feedback_for_run,
     list_unresolved_feedback,
     retest_feedback,
+    retrieval_gate_progress,
     set_answer_verdict,
 )
 from v2.documents import (
@@ -174,6 +176,7 @@ class V2FeedbackIn(BaseModel):
     expected_revision: int | None = Field(default=None)
     field_result: str | None = Field(default=None, max_length=20)
     reviewer_label: str = Field(default="", max_length=200)
+    expected_knowledge_ids: list[int] | None = Field(default=None)
 
 
 class V2FeedbackConfirmIn(BaseModel):
@@ -2626,6 +2629,7 @@ def _v2_feedback_response(item: dict) -> dict:
         "knowledge_id": item.get("knowledge_id"),
         "status": item.get("status", ""),
         "field_result": item.get("field_result"),
+        "expected_knowledge_ids": item.get("expected_knowledge_ids") or [],
         "reviewer_label": item.get("reviewer_label", ""),
         "run_question": item.get("run_question", ""),
         "run_answer_status": item.get("run_answer_status", ""),
@@ -2665,6 +2669,7 @@ def v2_create_feedback(
                 expected_revision=payload.expected_revision,
                 field_result=payload.field_result,
                 reviewer_label=payload.reviewer_label,
+                expected_knowledge_ids=payload.expected_knowledge_ids,
             )
     except FeedbackNotFound as exc:
         raise HTTPException(404, str(exc)) from exc
@@ -2699,6 +2704,24 @@ def v2_unresolved_feedback(
         "items": [_v2_feedback_response(item) for item in items],
         "total": total,
     })
+
+
+@app.get("/api/v2/failures")
+def v2_failures(
+    days: int = 7, limit: int = 50, x_api_key: str | None = Header(None),
+):
+    """Recent unjudged failures by Phase 5.3 category plus the gate count.
+
+    Categories only label failures and their default actions; nothing here
+    creates Knowledge or changes retrieval.  The retrieval gate stays closed
+    until 10 real questions prove qualified evidence was missed.
+    """
+
+    auth(x_api_key)
+    with db() as conn:
+        items = list_failures(conn, days=days, limit=limit)
+        gate = retrieval_gate_progress(conn)
+    return json_safe({"items": items, "total": len(items), "retrieval_gate": gate})
 
 
 @app.post("/api/v2/feedback/{feedback_id}/confirm")

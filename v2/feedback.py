@@ -47,6 +47,27 @@ FEEDBACK_KINDS = (
     "field_result_failure",
 )
 FEEDBACK_STATUSES = ("open", "confirmed", "closed")
+# Phase 5.3 failure taxonomy.  A failure is never auto-converted into new
+# Knowledge: each category names its default corrective action instead.
+FAILURE_CATEGORIES = (
+    "missing_source",
+    "knowledge_missing",
+    "retrieval_failure",
+    "generation_failure",
+    "applicability_version_failure",
+    "service_failure",
+)
+FAILURE_ACTIONS = {
+    "missing_source": "补资料或形成待确认 Experience",
+    "knowledge_missing": "修改/重提炼具体单元，回跑受影响问题",
+    "retrieval_failure": "检查型号/别名、范围过滤和排序，保留诊断样本",
+    "generation_failure": "修改生成约束/完整流程呈现并复测；不重复新增同样知识",
+    "applicability_version_failure": "修适用性和版本资格，不提高相似度阈值掩盖问题",
+    "service_failure": "延后重试/提示服务状态，不制造产品知识提问",
+}
+# Real questions proving qualified evidence was missed before any retrieval
+# improvement is allowed (astra gate).
+RETRIEVAL_GATE_NEEDED = 10
 UNIT_KINDS = ("fact", "procedure", "rule", "experience")
 FIELD_RESULTS = ("success", "failure")
 VERDICTS = ("pass", "fail")
@@ -96,8 +117,25 @@ _FEEDBACK_COLUMNS = (
     "f.correction_text, f.applicability, f.unit_kind, "
     "f.target_knowledge_id, f.expected_revision, f.raw_evidence_id, "
     "f.proposal_id, f.knowledge_id, f.status, f.field_result, "
-    "f.reviewer_label, f.created_at, f.updated_at"
+    "f.expected_knowledge_ids, f.reviewer_label, f.created_at, f.updated_at"
 )
+
+
+def _clean_expected_ids(value: Any) -> list[int]:
+    if value is None:
+        return []
+    if not isinstance(value, (list, tuple)):
+        raise FeedbackConflict("expected_knowledge_ids must be a list of integers")
+    cleaned = []
+    for item in value:
+        try:
+            number = int(item)
+        except (TypeError, ValueError) as exc:
+            raise FeedbackConflict("expected_knowledge_ids must be a list of integers") from exc
+        if number <= 0:
+            raise FeedbackConflict("expected_knowledge_ids must be positive integers")
+        cleaned.append(number)
+    return sorted(set(cleaned))
 
 
 def _feedback_to_dict(row: dict) -> dict:
@@ -207,6 +245,7 @@ def create_feedback(
     expected_revision: int | None = None,
     field_result: str | None = None,
     reviewer_label: str = "",
+    expected_knowledge_ids: list[int] | None = None,
 ) -> tuple[dict, bool]:
     """File one correction; same idempotency key returns the stored row."""
 
@@ -217,6 +256,9 @@ def create_feedback(
         raise FeedbackConflict(f"unknown unit kind: {unit_kind!r}")
     if field_result is not None and field_result not in FIELD_RESULTS:
         raise FeedbackConflict(f"unknown field result: {field_result!r}")
+    expected_ids = _clean_expected_ids(expected_knowledge_ids)
+    if expected_ids and kind != "retrieval_failure":
+        raise FeedbackConflict("expected_knowledge_ids only apply to retrieval_failure")
     text = _text(correction_text)
     if kind in ("reply_only", "save_experience") and not text:
         raise FeedbackConflict(f"{kind} requires a correction text")
@@ -282,8 +324,8 @@ def create_feedback(
                 answer_run_id, idempotency_key, feedback_kind, correction_text,
                 applicability, unit_kind, target_knowledge_id,
                 expected_revision, raw_evidence_id, status, field_result,
-                reviewer_label
-            ) VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                expected_knowledge_ids, reviewer_label
+            ) VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
             """,
             (
@@ -292,6 +334,7 @@ def create_feedback(
                 int(target["id"]) if target else None,
                 expected_revision,
                 int(evidence["id"]), status, field_result,
+                expected_ids,
                 str(reviewer_label or "").strip()[:200],
             ),
         )
@@ -686,22 +729,183 @@ def retest_feedback(
     )
 
 
+def classify_run_failure(run: dict, feedback: dict | None = None) -> tuple[str, str]:
+    """Map one failed run to a Phase 5.3 category plus its default action.
+
+    Engineer-filed feedback kinds outrank heuristics.  The mapping never
+    creates Knowledge and never changes retrieval by itself.
+    """
+
+    feedback_kind = str((feedback or {}).get("feedback_kind") or "")
+    if feedback_kind == "retrieval_failure":
+        category = "retrieval_failure"
+    elif feedback_kind == "generation_failure":
+        category = "generation_failure"
+    elif feedback_kind == "missing_information":
+        category = "knowledge_missing"
+    elif feedback_kind == "field_result_failure":
+        category = "applicability_version_failure"
+    elif str(run.get("execution_status") or "") == "failed" or str(
+        run.get("answer_status") or ""
+    ) == "service_error":
+        category = "service_failure"
+    elif str(run.get("answer_status") or "") == "needs_clarification" or str(
+        run.get("reason_code") or ""
+    ) in ("model_not_covered", "missing_model", "missing_version"):
+        category = "applicability_version_failure"
+    else:
+        trace = run.get("retrieval_trace") or {}
+        candidates = list(trace.get("candidate_knowledge_ids") or [])
+        eligible = list(trace.get("eligible_knowledge_ids") or [])
+        document = trace.get("document") or {}
+        if candidates:
+            category = "generation_failure"
+        elif eligible:
+            category = "knowledge_missing"
+        elif list(document.get("candidate_block_ids") or []):
+            category = "knowledge_missing"
+        else:
+            category = "missing_source"
+    return category, FAILURE_ACTIONS[category]
+
+
+def list_failures(conn, *, days: int = 7, limit: int = 50) -> list[dict]:
+    """Recent unjudged failures with categories for the lightweight view."""
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT r.id, r.question, r.execution_status, r.answer_status,
+                   r.reason_code, r.reviewer_verdict, r.created_at,
+                   r.retrieval_trace, r.retest_of, r.feedback_id
+            FROM v2_answer_runs r
+            WHERE r.created_at >= CURRENT_TIMESTAMP - make_interval(days => %s)
+              AND (r.answer_status IN ('unsupported', 'service_error')
+                   OR r.execution_status = 'failed')
+              AND (r.reviewer_verdict IS NULL OR r.reviewer_verdict = 'fail')
+            ORDER BY r.id DESC
+            LIMIT %s
+            """,
+            (max(1, min(int(days), 90)), max(1, min(int(limit), 200))),
+        )
+        runs = [dict(row) for row in cur.fetchall()]
+    items = []
+    for run in runs:
+        feedback = None
+        if run.get("feedback_id"):
+            feedback = get_feedback(conn, int(run["feedback_id"]))
+        if feedback is None:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT {_FEEDBACK_COLUMNS}
+                    FROM v2_answer_feedback f
+                    WHERE f.answer_run_id=%s AND f.status='open'
+                    ORDER BY f.id DESC LIMIT 1
+                    """,
+                    (int(run["id"]),),
+                )
+                row = cur.fetchone()
+                feedback = _feedback_to_dict(row) if row else None
+        category, action = classify_run_failure(run, feedback)
+        trace = run.get("retrieval_trace") or {}
+        items.append({
+            "run_id": int(run["id"]),
+            "question": str(run.get("question") or "")[:300],
+            "answer_status": str(run.get("answer_status") or ""),
+            "reason_code": str(run.get("reason_code") or ""),
+            "reviewer_verdict": run.get("reviewer_verdict"),
+            "category": category,
+            "default_action": action,
+            "feedback_id": (int(feedback["id"]) if feedback else None),
+            "feedback_kind": str((feedback or {}).get("feedback_kind") or ""),
+            "eligible_count": len(list(trace.get("eligible_knowledge_ids") or [])),
+            "candidate_count": len(list(trace.get("candidate_knowledge_ids") or [])),
+            "created_at": run.get("created_at"),
+        })
+    return items
+
+
+def retrieval_gate_progress(conn) -> dict:
+    """How far the retrieval-improvement gate has progressed (X/10).
+
+    Only retrieval_failure feedback whose expected Knowledge is currently
+    answer-eligible counts: the evidence must provably be in the library.
+    """
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT f.id, f.expected_knowledge_ids
+            FROM v2_answer_feedback f
+            WHERE f.feedback_kind='retrieval_failure'
+              AND f.status IN ('open', 'confirmed')
+              AND coalesce(array_length(f.expected_knowledge_ids, 1), 0) > 0
+            ORDER BY f.id
+            """,
+        )
+        rows = [dict(row) for row in cur.fetchall()]
+    qualifying = []
+    for row in rows:
+        expected = [int(item) for item in (row.get("expected_knowledge_ids") or [])]
+        if not expected:
+            continue
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT k.id
+                FROM v2_knowledge k
+                WHERE k.id = ANY(%s)
+                  AND k.active=TRUE
+                  AND k.trust IN ('official_source', 'user_confirmed')
+                  AND (k.origin_document_version_id IS NULL
+                       OR k.validation_status='validated')
+                  AND EXISTS (
+                        SELECT 1 FROM v2_knowledge_sources s
+                        JOIN v2_raw_evidence r ON r.id=s.raw_evidence_id
+                        WHERE s.knowledge_id=k.id
+                          AND s.active=TRUE
+                          AND s.relation='supports'
+                          AND s.resolution='accepted'
+                          AND r.evidence_status='active'
+                      )
+                """,
+                (expected,),
+            )
+            eligible = {int(item["id"]) for item in cur.fetchall()}
+        if eligible:
+            qualifying.append({"feedback_id": int(row["id"]),
+                               "eligible_expected_ids": sorted(eligible)})
+    return {
+        "qualifying_cases": len(qualifying),
+        "needed": RETRIEVAL_GATE_NEEDED,
+        "gate_open": len(qualifying) >= RETRIEVAL_GATE_NEEDED,
+        "cases": qualifying,
+    }
+
+
 __all__ = [
+    "FAILURE_ACTIONS",
+    "FAILURE_CATEGORIES",
     "FEEDBACK_KINDS",
     "FEEDBACK_STATUSES",
     "FIELD_RESULTS",
+    "RETRIEVAL_GATE_NEEDED",
     "UNIT_KINDS",
     "VERDICTS",
     "FeedbackConflict",
     "FeedbackNotFound",
     "StaleRevision",
+    "classify_run_failure",
     "close_feedback",
     "confirm_feedback",
     "count_unresolved_feedback",
     "create_feedback",
     "get_feedback",
+    "list_failures",
     "list_feedback_for_run",
     "list_unresolved_feedback",
     "retest_feedback",
+    "retrieval_gate_progress",
     "set_answer_verdict",
 ]

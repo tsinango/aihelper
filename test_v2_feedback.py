@@ -97,7 +97,8 @@ class FakeCursor:
                 "unit_kind": params[5], "target_knowledge_id": params[6],
                 "expected_revision": params[7], "raw_evidence_id": int(params[8]),
                 "proposal_id": None, "knowledge_id": None, "status": params[9],
-                "field_result": params[10], "reviewer_label": params[11],
+                "field_result": params[10], "expected_knowledge_ids": list(params[11]),
+                "reviewer_label": params[12],
                 "created_at": _now(), "updated_at": _now(),
             }
             self._result = [{"id": feedback_id}]

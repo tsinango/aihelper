@@ -19,7 +19,7 @@ The codebase is in transition between two generations:
   `/review/published`) where reviewers approve Telegram-derived support-case
   knowledge into published `verified_knowledge`. Only published knowledge may
   answer customers; historical case memory is recall/reviewer evidence only.
-- **V2** (Phases 1–5.2 implemented): a new Inbox-first
+- **V2** (Phases 1–5.3 implemented): a new Inbox-first
   learning loop under `v2/` with its own `v2_`-prefixed tables, pages
   (`/inbox`, `/knowledge`, `/documents`, `/chat`) and `/api/v2/*` routes.
   Knowledge carries one of four trust values (`official_source`,
@@ -105,6 +105,8 @@ systemd, batch jobs, review workflow), `TECHNICAL_STATUS_AND_REMEDIATION.md`
   `025_v2_document_revalidation.sql` adds Phase 5.2 lineage
   (`previous_version_id`, `change_summary`) and the `revalidate` history
   action.
+  `026_v2_failure_tracking.sql` adds Phase 5.3 `expected_knowledge_ids`
+  for the 10-case retrieval-improvement gate.
   `apply_migration.py` records SHA-256 checksums in `schema_migrations` and
   rejects changed or out-of-tree migration files.
 - Batch/offline scripts (top level): `organize_telegram_knowledge.py`

@@ -282,6 +282,12 @@ def main() -> int:
         default="",
         help="optional PostgreSQL URL for V2 Knowledge readiness and lexical retrieval baseline",
     )
+    parser.add_argument(
+        "--failure-report",
+        default="",
+        help="optional path: also write the Phase 5.3 failure taxonomy and retrieval-gate count (needs --database-url)",
+    )
+    parser.add_argument("--failure-days", type=int, default=30)
     args = parser.parse_args()
 
     errors: list[str] = []
@@ -330,12 +336,43 @@ def main() -> int:
         "warnings": warnings,
         "errors": errors,
     }
+    if args.failure_report:
+        if not args.database_url:
+            errors.append("--failure-report needs --database-url")
+        else:
+            try:
+                from v2.feedback import list_failures, retrieval_gate_progress
+
+                import psycopg
+                from psycopg.rows import dict_row
+
+                with psycopg.connect(args.database_url, row_factory=dict_row) as conn:
+                    failures = list_failures(conn, days=args.failure_days, limit=200)
+                    gate = retrieval_gate_progress(conn)
+                by_category: dict[str, int] = {}
+                for item in failures:
+                    by_category[item["category"]] = by_category.get(item["category"], 0) + 1
+                failure_section = {
+                    "days": args.failure_days,
+                    "total": len(failures),
+                    "by_category": by_category,
+                    "retrieval_gate": gate,
+                    "items": failures,
+                }
+                report["failures"] = failure_section
+                Path(args.failure_report).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.failure_report).write_text(
+                    json.dumps(failure_section, ensure_ascii=False, indent=2, default=str),
+                    encoding="utf-8",
+                )
+            except Exception as exc:  # failure stats must never crash the runner
+                errors.append(f"failure report failed: {exc}")
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(
-        json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
+        json.dumps(report, ensure_ascii=False, indent=2, default=str), encoding="utf-8"
     )
 
-    print(json.dumps(report, ensure_ascii=False, indent=2))
+    print(json.dumps(report, ensure_ascii=False, indent=2, default=str))
     if errors:
         print(f"\nevaluation readiness check FAILED ({len(errors)} errors)", file=sys.stderr)
         return 1

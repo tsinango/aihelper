@@ -90,6 +90,8 @@ class V2UiTest(unittest.TestCase):
         self.assertIn("drawer-title", content)
         self.assertIn("/api/v2/feedback/unresolved", content)
         self.assertIn("/close", content)
+        self.assertIn("failures-toggle", content)
+        self.assertIn("/api/v2/failures", content)
 
     def test_document_learning_contract(self):
         content = (ROOT / "templates" / "documents.html").read_text()
