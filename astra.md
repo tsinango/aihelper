@@ -456,3 +456,9 @@ git status --short
 最高的数据维护风险是 Phase 5.2：全局限制变化却没有使派生知识重新验证。控制方式是 Phase 4 就记录版本和全部来源依赖；不确定时按新版本整本重验，先保守正确，再谈增量优化。
 
 项目推进的最终判断不是表数、代码量、知识条数或模型大小，而是：工程师是否愿意每天打开，真实问题是否更容易解决，一次纠正是否减少了下一次错误，以及维护负担是否仍能由一个人承担。
+
+## 9. 实施状态记录（开发过程中追加，只记事实）
+
+- 2026-09-06 Step 0 inventory：main 到 817e4c2，迁移 001–021（最新 021_v2_answer_runs.sql），Phase 3.0/3.1 已实现（retrieve_for_answer、v2/answering.py、v2_answer_runs、POST/GET /api/v2/answers、Chat 问答页、evaluate_v2_answers.py），Phase 3.2/4/5 未开始。`v2_answer_feedback`、`v2/feedback.py`、`v2/documents.py`、`v2_document_versions` 等均不存在。
+- 2026-09-06 Step 1 hardening：answer evidence gate（accepted supports 来源对应的 raw evidence 必须 `evidence_status='active'`，superseded/redacted 不得支撑新答案）已在 e271075 落地并 push；本轮只补回归测试腐蚀修复（test_production_hardening 去掉过时的 Chat 导航排除断言，导航契约以 test_v2_ui 为准）。
+- 2026-09-06 Phase 3.1 evaluation（`data/v2_eval_phase31_step1.json`，full；`..._retrieval.json`，retrieval-only；gitignored，仅本机验收用）：30/30 `pending_expert_mapping`，模型 `nvidia/nemotron-3-ultra-550b-a55b:free`，prompt `v2-answer-2`，28 次 LLM 调用；status_match 4/30（命中的 4 条全是预期 unsupported 的无依据类），mechanical critical_flags 全部为 0。**这不表示“答案全部正确”，只表示确定性引用检查无触发；4/30 也不表示系统损坏——sidecar 尚无专家知识映射，fail-closed 到 unsupported 是正确行为。** 真实覆盖问题以前一轮 5 条 supplementary 真实问答验证为准（answered/cited），`human_verdict` 全为 null，待领域人工统一验收。

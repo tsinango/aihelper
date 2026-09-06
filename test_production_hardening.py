@@ -91,7 +91,9 @@ class ProductionHardeningTest(unittest.TestCase):
         self.assertIn("后台知识处理服务暂时不可用", content)
         self.assertIn("内容已经保存，后台处理恢复后会继续", content)
         self.assertIn("worker_healthy", content)
-        self.assertNotIn('href="/chat"', content)
+        # The internal QA page is linked from the main nav (verified client
+        # flow); the nav contract itself lives in test_v2_ui.py.
+        self.assertIn('href="/chat"', content)
 
 
 if __name__ == "__main__":
