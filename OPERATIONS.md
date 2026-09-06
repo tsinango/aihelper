@@ -206,6 +206,31 @@ Phase 3.0 尚无 V2 Answer Service：runner 不生成、不伪造 V2 答案准�
 `golden_reference` 不会被当作模型答案。第一次真实端到端 QA baseline 在
 Phase 3.1 实现 answer service 后产生，成为后续版本的比较基准。
 
+## V2 内部问答评测（Phase 3.1）
+
+`evaluate_v2_answers.py` 把固定的 30 条 sidecar 用例和可选的补充问题送入
+只读 Answer Service（真实模型与 embedding），记录 answer status、evidence
+snapshot、latency 和确定性 critical flags；`human_verdict` 始终留空，由领域
+专家人工填写，模型不给自己打分。每次运行写入带 tag 的 `v2_answer_runs`
+行（对 Knowledge 只读），不会导入 golden_reference，也不会创建 Knowledge：
+
+```bash
+.venv/bin/python evaluate_v2_answers.py \
+  --database-url postgresql://... --env-file /etc/aihelper.env \
+  --extra-questions data/v2_eval_supplementary_questions.json \
+  --report data/v2_eval_phase31b_report.json
+```
+
+只跑 retrieval triage、不调用模型：
+
+```bash
+.venv/bin/python evaluate_v2_answers.py \
+  --database-url postgresql://... --retrieval-only
+```
+
+`--tag` 覆盖幂等键前缀（默认 `phase31-YYYYMMDD`）；同一 tag 重跑会命中幂等
+返回已存 run，不重复调用模型。
+
 ## 本机 Qwen 离线评测
 
 本机 Qwen3.5-2B/4B 是临时的影子评测模型，不由 systemd 托管，也不接收

@@ -3,24 +3,49 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Chat · aihelper V2</title>
+  <title>内部问答 · aihelper V2</title>
   <style>
-    :root{--bg:#f6f7f9;--panel:#fff;--line:#e5e7eb;--text:#17212b;--muted:#667085;--blue:#2563eb;--blue-soft:#eff6ff;--red:#b42318;--shadow:0 1px 2px #1018280d}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}button,input,textarea{font:inherit}button{border:1px solid #cbd5e1;border-radius:8px;background:#fff;color:var(--text);padding:8px 12px;cursor:pointer}button:hover{border-color:var(--blue);background:#f8fbff}.primary{background:var(--blue);border-color:var(--blue);color:#fff}.primary:hover{background:#1d4ed8;color:#fff}button:disabled{opacity:.55;cursor:wait}.topbar{min-height:60px;border-bottom:1px solid var(--line);background:#fff}.shell{max-width:900px;margin:0 auto;padding:0 20px}.top-inner{display:flex;align-items:center;gap:18px;min-height:60px}.brand{font-weight:750;color:var(--text);text-decoration:none}.nav{display:flex;gap:4px}.nav a{color:var(--muted);text-decoration:none;padding:7px 10px;border-radius:7px}.nav a:hover,.nav a.active{background:var(--blue-soft);color:var(--blue)}.keybox{display:flex;align-items:center;gap:7px;margin-left:auto;color:var(--muted);font-size:12px}.keybox input{width:170px;border:1px solid #cbd5e1;border-radius:7px;padding:7px 8px}.page{padding:30px 0}.chat-card{height:calc(100vh - 120px);min-height:560px;display:flex;flex-direction:column;background:#fff;border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);overflow:hidden}.chat-head{padding:17px 20px;border-bottom:1px solid var(--line)}.chat-head h1{font-size:19px;margin:0 0 3px}.chat-head p{margin:0;color:var(--muted);font-size:13px}.messages{flex:1;overflow:auto;padding:25px 22px;background:#fbfcfe}.empty{text-align:center;color:var(--muted);padding:70px 20px}.empty strong{display:block;color:var(--text);font-size:17px;margin-bottom:5px}.message-row{display:flex;margin-bottom:15px}.message-row.user{justify-content:flex-end}.wrap{max-width:min(78%,680px)}.meta{color:var(--muted);font-size:11px;margin:0 5px 4px}.message-row.user .meta{text-align:right}.bubble{padding:11px 14px;border:1px solid var(--line);border-radius:13px;background:#fff;white-space:pre-wrap;overflow-wrap:anywhere;border-bottom-left-radius:4px}.message-row.user .bubble{background:var(--blue);border-color:var(--blue);color:#fff;border-bottom-left-radius:13px;border-bottom-right-radius:4px}.sources{margin-top:8px;padding-top:7px;border-top:1px solid #edf0f3;color:var(--muted);font-size:11px}.composer{display:flex;gap:8px;align-items:flex-end;padding:14px 16px;border-top:1px solid var(--line)}textarea{flex:1;min-height:44px;max-height:150px;resize:vertical;border:1px solid #cbd5e1;border-radius:9px;padding:10px 11px}textarea:focus,.keybox input:focus{outline:2px solid #bfdbfe;border-color:var(--blue)}.note{padding:0 16px 11px;color:var(--muted);font-size:11px}.error{color:var(--red);background:#fff1f0;border:1px solid #fecaca;border-radius:8px;padding:9px 11px;margin-bottom:12px}@media(max-width:720px){.shell{padding:0 10px}.top-inner{flex-wrap:wrap;height:auto;padding:10px 0;gap:8px}.keybox{width:100%;margin-left:0}.keybox input{flex:1}.chat-card{height:calc(100vh - 105px);min-height:500px}.wrap{max-width:90%}}
+    :root{--bg:#f6f7f9;--panel:#fff;--line:#e5e7eb;--text:#17212b;--muted:#667085;--blue:#2563eb;--blue-soft:#eff6ff;--red:#b42318;--amber:#92400e;--amber-bg:#fef3c7;--green:#166534;--green-bg:#dcfce7;--shadow:0 1px 2px #1018280d}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}button,input,textarea{font:inherit}button{border:1px solid #cbd5e1;border-radius:8px;background:#fff;color:var(--text);padding:8px 12px;cursor:pointer}button:hover{border-color:var(--blue);background:#f8fbff}.primary{background:var(--blue);border-color:var(--blue);color:#fff}.primary:hover{background:#1d4ed8;color:#fff}button:disabled{opacity:.55;cursor:wait}.topbar{min-height:60px;border-bottom:1px solid var(--line);background:#fff}.shell{max-width:900px;margin:0 auto;padding:0 20px}.top-inner{display:flex;align-items:center;gap:18px;min-height:60px}.brand{font-weight:750;color:var(--text);text-decoration:none}.nav{display:flex;gap:4px}.nav a{color:var(--muted);text-decoration:none;padding:7px 10px;border-radius:7px}.nav a:hover,.nav a.active{background:var(--blue-soft);color:var(--blue)}.page{padding:30px 0}.card{background:#fff;border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);overflow:hidden;margin-bottom:16px}.card-head{padding:17px 20px;border-bottom:1px solid var(--line)}.card-head h1{font-size:19px;margin:0 0 3px}.card-head p{margin:0;color:var(--muted);font-size:13px}.card-body{padding:20px}.draft-banner{display:flex;gap:8px;align-items:flex-start;background:var(--amber-bg);border:1px solid #f5d67b;border-radius:9px;padding:10px 12px;margin-bottom:14px;color:var(--amber);font-size:13px}.composer textarea{width:100%;min-height:88px;border:1px solid #cbd5e1;border-radius:9px;padding:10px 12px;resize:vertical}.composer textarea:focus{outline:2px solid #bfdbfe;border-color:var(--blue)}.composer-row{display:flex;gap:8px;margin-top:10px;align-items:center}.composer-row .spacer{flex:1}.hint{color:var(--muted);font-size:12px;margin-top:8px}.error{background:#fef2f2;border:1px solid #fecaca;color:var(--red);border-radius:9px;padding:10px 12px;margin-bottom:14px}.answer{white-space:pre-wrap}.status{display:inline-block;font-size:12px;font-weight:700;border-radius:20px;padding:2px 10px;margin-bottom:8px}.status.answered{background:var(--green-bg);color:var(--green)}.status.needs_clarification{background:var(--amber-bg);color:var(--amber)}.status.unsupported{background:#f3f4f6;color:var(--muted)}.status.service_error{background:#fee2e2;color:var(--red)}.meta{color:var(--muted);font-size:12px;margin-top:10px}.sources{margin:12px 0 0;padding:0;list-style:none}.sources li{border-top:1px solid var(--line);padding:10px 0}.sources .src-title{font-weight:650}.sources .src-meta{color:var(--muted);font-size:12px;margin:2px 0}.sources .src-excerpt{background:#f8fafc;border-left:3px solid var(--blue);padding:6px 10px;margin-top:6px;font-size:13px;white-space:pre-wrap}.empty{text-align:center;color:var(--muted);padding:40px 20px}
   </style>
 <style>
   .nav { overflow-x: auto; }
   .nav a { white-space: nowrap; }
-  .key-settings{margin-left:auto;color:var(--muted);font-size:12px;position:relative}.key-settings summary{cursor:pointer;list-style:none;padding:7px 9px;border:1px solid transparent;border-radius:8px;white-space:nowrap}.key-settings summary::-webkit-details-marker{display:none}.key-settings summary::after{content:'⌄';margin-left:5px}.key-settings[open] summary{border-color:#cbd5e1;background:#f8fafc}.key-panel{position:absolute;right:0;top:calc(100% + 6px);z-index:2;display:grid;grid-template-columns:auto minmax(150px,1fr) auto;align-items:center;gap:8px;width:min(360px,calc(100vw - 20px));padding:10px;background:#fff;border:1px solid var(--line);border-radius:9px;box-shadow:0 8px 22px #1018281a}.key-panel input{min-width:0;border:1px solid #cbd5e1;border-radius:7px;padding:7px 8px}.key-panel input:focus{outline:2px solid #bfdbfe;border-color:var(--blue)}.quick-replies{display:flex;gap:7px;flex-wrap:wrap;margin-top:9px}.quick-replies button{font-size:12px;padding:6px 10px}
+  .key-settings{margin-left:auto;color:var(--muted);font-size:12px;position:relative}.key-settings summary{cursor:pointer;list-style:none;padding:7px 9px;border:1px solid transparent;border-radius:8px;white-space:nowrap}.key-settings summary::-webkit-details-marker{display:none}.key-settings summary::after{content:'⌄';margin-left:5px}.key-settings[open] summary{border-color:#cbd5e1;background:#f8fafc}.key-panel{position:absolute;right:0;top:calc(100% + 6px);z-index:2;display:grid;grid-template-columns:auto minmax(150px,1fr) auto;align-items:center;gap:8px;width:min(360px,calc(100vw - 20px));padding:10px;background:#fff;border:1px solid var(--line);border-radius:9px;box-shadow:0 8px 22px #1018281a}.key-panel input{min-width:0;border:1px solid #cbd5e1;border-radius:7px;padding:7px 8px}.key-panel input:focus{outline:2px solid #bfdbfe;border-color:var(--blue)}
 </style>
 </head>
 <body>
   <header class="topbar"><div class="shell top-inner"><a class="brand" href="/inbox">aihelper V2</a><nav class="nav" aria-label="主导航"><a href="/inbox">Inbox</a><a href="/knowledge">Knowledge</a><a href="/documents">Documents</a></nav><details class="key-settings" id="key-settings"><summary>设置 <span id="key-status">未设置</span></summary><div class="key-panel"><label for="api-key">API Key</label><input id="api-key" type="password" autocomplete="off" placeholder="输入后保存"><button id="save-key" type="button">保存</button></div></details></div></header>
-  <main class="shell page"><div id="error" class="error" hidden></div><section class="chat-card"><header class="chat-head"><h1>Chat</h1><p>只根据已经确认的产品知识回答。没有足够依据时，我会明确告诉你。</p></header><div id="messages" class="messages"><div class="empty"><strong>你好</strong>问一个产品问题，或粘贴一段资料开始对话。</div></div><form id="composer" class="composer"><textarea id="input" placeholder="输入产品问题…" aria-label="产品问题"></textarea><button class="primary" type="submit">发送</button></form><div class="note">Enter 发送 · Shift + Enter 换行</div></section></main>
+  <main class="shell page">
+    <div id="error" class="error" hidden></div>
+    <section class="card">
+      <header class="card-head"><h1>内部问答 Internal QA</h1><p>只读已确认的 V2 Knowledge。回答是工程师草稿，不会学习、不会修改 Knowledge。</p></header>
+      <div class="card-body">
+        <div class="draft-banner"><span>⚠️</span><span><strong>Internal engineer draft.</strong> 答案仅供内部工程师参考，不得直接发给客户。学习资料请送入 Inbox。</span></div>
+        <form id="composer" class="composer">
+          <textarea id="input" placeholder="输入真实技术问题，例如：F-NR-208E/2 如何安装在机架上？" aria-label="产品问题"></textarea>
+          <div class="composer-row">
+            <button class="primary" type="submit">提问</button>
+            <button id="to-inbox" type="button" title="把当前输入作为学习资料送入 Inbox">转入 Inbox 学习</button>
+            <span class="spacer"></span>
+          </div>
+        </form>
+        <div class="hint">Enter 提问 · Shift + Enter 换行 · 每次提问使用独立 Idempotency-Key</div>
+      </div>
+    </section>
+    <section class="card" id="result-card" hidden>
+      <header class="card-head"><h1>回答</h1><p id="result-sub">—</p></header>
+      <div class="card-body">
+        <span id="result-status" class="status">—</span>
+        <div id="result-text" class="answer"></div>
+        <ul id="result-sources" class="sources"></ul>
+        <div id="result-meta" class="meta"></div>
+      </div>
+    </section>
+  </main>
   <script>
     const $ = id => document.getElementById(id);
     const keyInput = $('api-key');
     const input = $('input');
-    const state = {threadId: new URLSearchParams(location.search).get('thread')};
     keyInput.value = sessionStorage.getItem('x-api-key') || '';
 
     function setKey(value) {
@@ -33,7 +58,6 @@
     $('save-key').addEventListener('click', () => {
       setKey(keyInput.value);
       $('key-settings').open = false;
-      loadThread();
     });
     keyInput.addEventListener('keydown', event => {
       if (event.key === 'Enter') $('save-key').click();
@@ -59,13 +83,6 @@
       return data;
     }
 
-    function list(data) {
-      if (Array.isArray(data)) return data;
-      if (!data || typeof data !== 'object') return [];
-      const result = data.messages || data.items || [];
-      return Array.isArray(result) ? result : [];
-    }
-
     function value(item, ...keys) {
       for (const key of keys) if (item && item[key] != null) return item[key];
       return '';
@@ -77,100 +94,121 @@
       return values.map(item => typeof item === 'string' ? item : value(item, 'title', 'name', 'label')).filter(Boolean).map(String);
     }
 
-    function editInInbox() {
-      if (state.threadId) {
-        window.location.assign(`/inbox?thread=${encodeURIComponent(state.threadId)}`);
-        return;
-      }
-      input.focus();
+    const STATUS_TEXT = {
+      answered: '已回答草稿',
+      needs_clarification: '需要澄清',
+      unsupported: '无依据',
+      service_error: '服务错误',
+    };
+
+    function uuid() {
+      if (crypto.randomUUID) return crypto.randomUUID();
+      return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+        const r = Math.random() * 16 | 0;
+        return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+      });
     }
 
-    function renderQuickReplies(container, messageType) {
-      const replies = document.createElement('div');
-      replies.className = 'quick-replies';
-      replies.setAttribute('aria-label', '快速回复');
-      const labels = messageType === 'clarification'
-        ? ['查看并编辑', '不知道', '跳过']
-        : ['对', '查看并编辑', '不知道', '跳过'];
-      for (const label of labels) {
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.textContent = label;
-        button.onclick = () => label === '查看并编辑' ? editInInbox() : send(label);
-        replies.append(button);
-      }
-      container.append(replies);
-    }
-
-    function render(data) {
-      const messages = list(data);
-      const box = $('messages');
+    function renderAnswer(data) {
+      const card = $('result-card');
+      card.hidden = false;
+      const status = String(value(data, 'answer_status') || 'service_error');
+      const badge = $('result-status');
+      badge.className = 'status ' + status;
+      badge.textContent = STATUS_TEXT[status] || status;
+      const text = status === 'answered'
+        ? String(value(data, 'answer_text'))
+        : status === 'needs_clarification'
+          ? String(value(data, 'clarifying_question'))
+          : status === 'unsupported'
+            ? '根据已确认的 V2 Knowledge 无法回答：' + String(value(data, 'reason_code') || 'no_eligible_evidence')
+            : '问答服务暂时不可用，请稍后重试（' + String(value(data, 'reason_code') || 'service_error') + '）。';
+      $('result-text').textContent = text;
+      $('result-sub').textContent = `run ${value(data, 'run_id')} · ${value(data, 'reason_code')}`;
+      const box = $('result-sources');
       box.replaceChildren();
-      if (!messages.length) {
-        box.innerHTML = '<div class="empty"><strong>你好</strong>问一个产品问题，或粘贴一段资料开始对话。</div>';
-        return;
-      }
-      const lastIndex = messages.length - 1;
-      for (const [index, item] of messages.entries()) {
-        const role = String(value(item, 'role', 'sender_type', 'author') || 'assistant').toLowerCase();
-        const user = ['user', 'human', 'me', 'customer'].includes(role);
-        const row = document.createElement('div');
-        row.className = 'message-row ' + (user ? 'user' : 'assistant');
-        const wrap = document.createElement('div');
-        wrap.className = 'wrap';
+      const citations = Array.isArray(data.citations) ? data.citations : [];
+      for (const item of citations) {
+        const row = document.createElement('li');
+        const title = document.createElement('div');
+        title.className = 'src-title';
+        title.textContent = `K${value(item, 'knowledge_id')} · ${value(item, 'title') || '（无标题）'}`;
+        row.append(title);
         const meta = document.createElement('div');
-        meta.className = 'meta';
-        meta.textContent = user ? '我' : 'aihelper';
-        const bubble = document.createElement('div');
-        bubble.className = 'bubble';
-        bubble.textContent = String(value(item, 'content', 'text', 'message', 'body'));
-        const labels = sourceLabels(value(item, 'sources', 'source'));
-        if (labels.length) {
-          const sourceBox = document.createElement('div');
-          sourceBox.className = 'sources';
-          sourceBox.textContent = '来源：' + labels.join('、');
-          bubble.append(sourceBox);
+        meta.className = 'src-meta';
+        const scopeModels = (Array.isArray(item.scope_models) ? item.scope_models : []).join(', ');
+        const scopeVersions = (Array.isArray(item.scope_versions) ? item.scope_versions : []).join(', ');
+        meta.textContent = `trust=${value(item, 'trust')} entity=${value(item, 'entity_name')}`
+          + (scopeModels ? ` models=${scopeModels}` : '')
+          + (scopeVersions ? ` versions=${scopeVersions}` : '');
+        row.append(meta);
+        const labels = sourceLabels(value(item, 'sources'));
+        const sources = Array.isArray(item.sources) ? item.sources : [];
+        for (const source of sources) {
+          const excerpt = document.createElement('div');
+          excerpt.className = 'src-excerpt';
+          const locator = value(source, 'source_locator');
+          excerpt.textContent = String(value(source, 'excerpt') || labels.join('、'))
+            + (locator ? `\n定位：${locator}` : '');
+          row.append(excerpt);
         }
-        wrap.append(meta, bubble);
-        const messageType = String(value(item, 'message_type', 'type')).toLowerCase();
-        if (index === lastIndex && !user && ['question', 'clarification'].includes(messageType)) renderQuickReplies(wrap, messageType);
-        row.append(wrap);
         box.append(row);
       }
-      box.scrollTop = box.scrollHeight;
-    }
-
-    async function loadThread() {
-      if (!state.threadId) return;
-      try { render(await api(`/api/v2/inbox/threads/${encodeURIComponent(state.threadId)}`)); }
-      catch (error) { showError(error.message); }
-    }
-
-    async function send(content) {
-      const button = document.querySelector('#composer button');
-      button.disabled = true;
-      try {
-        const body = {content};
-        if (state.threadId) body.thread_id = state.threadId;
-        const data = await api('/api/v2/inbox/messages', {method: 'POST', body: JSON.stringify(body)});
-        state.threadId = data.thread_id || state.threadId;
-        render(data.messages ? data : data.thread ? data.thread : {messages: [{role: 'user', content}]});
-        if (state.threadId) history.replaceState(null, '', `/chat?thread=${encodeURIComponent(state.threadId)}`);
-      } catch (error) {
-        if (!input.value) input.value = content;
-        showError(error.message);
-      } finally {
-        button.disabled = false;
-      }
+      $('result-meta').textContent =
+        `model=${value(data, 'model')} prompt=${value(data, 'prompt_version')}` +
+        ` latency=${value(data, 'latency_ms')}ms llm_calls=${value(data, 'llm_requests')}` +
+        (data.duplicate ? ' · 幂等命中（未重复调用模型）' : '');
+      card.scrollIntoView({behavior: 'smooth', block: 'nearest'});
     }
 
     function showError(message) { $('error').textContent = message; $('error').hidden = false; }
+    function clearError() { $('error').hidden = true; }
+
+    async function ask(question) {
+      const button = document.querySelector('#composer button.primary');
+      button.disabled = true;
+      clearError();
+      try {
+        const data = await api('/api/v2/answers', {
+          method: 'POST',
+          headers: {'Idempotency-Key': uuid()},
+          body: JSON.stringify({question}),
+        });
+        renderAnswer(data);
+      } catch (error) {
+        showError(error.message);
+      } finally {
+        button.disabled = false;
+        input.focus();
+      }
+    }
+
+    async function sendToInbox(content) {
+      clearError();
+      try {
+        const data = await api('/api/v2/inbox/messages', {
+          method: 'POST',
+          headers: {'Idempotency-Key': uuid()},
+          body: JSON.stringify({content}),
+        });
+        const threadId = data.thread_id || (data.thread && data.thread.id);
+        if (threadId) window.location.assign(`/inbox?thread=${encodeURIComponent(threadId)}`);
+        else window.location.assign('/inbox');
+      } catch (error) {
+        showError(error.message);
+      }
+    }
+
     $('composer').addEventListener('submit', event => {
       event.preventDefault();
       const content = input.value.trim();
       if (!content) return;
-      input.value = '';
-      send(content);
+      ask(content);
+    });
+    $('to-inbox').addEventListener('click', () => {
+      const content = input.value.trim();
+      if (!content) { input.focus(); return; }
+      sendToInbox(content);
     });
     input.addEventListener('keydown', event => {
       if (event.key === 'Enter' && !event.shiftKey) {
@@ -178,7 +216,7 @@
         $('composer').requestSubmit();
       }
     });
-    loadThread();
+    input.focus();
   </script>
 </body>
 </html>

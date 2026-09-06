@@ -66,6 +66,13 @@ from v2.service import (
     worker_health,
 )
 from v2.learning import learn_turn
+from v2.answering import (
+    AnswerConflict,
+    AnswerInProgress,
+    _run_to_dict,
+    answer_question,
+    get_answer_run,
+)
 from v2.processing import (
     enqueue_inbox_job,
     process_inbox_job,
@@ -111,6 +118,11 @@ class V2InboxMessageIn(BaseModel):
     content: str = Field(min_length=1, max_length=12000)
     thread_id: int | None = Field(default=None, gt=0)
     channel: str = Field(default="inbox", min_length=1, max_length=32)
+
+
+class V2AnswerIn(BaseModel):
+    question: str = Field(min_length=1, max_length=4000)
+    context: dict | None = Field(default=None)
 
 
 def _process_v2_inbox_job(job_id: int) -> None:
@@ -2050,6 +2062,84 @@ def v2_chat(x_api_key: str | None = Header(None)):
     auth(x_api_key)
     with db() as conn:
         return json_safe(inbox_snapshot(conn))
+
+
+def _v2_answer_response(run: dict) -> dict:
+    """Public answer-run shape with a condensed citation view of the snapshot."""
+
+    citations = []
+    for item in run.get("evidence_snapshot") or []:
+        if not isinstance(item, dict):
+            continue
+        citations.append({
+            "knowledge_id": item.get("knowledge_id"),
+            "title": item.get("title", ""),
+            "entity_name": item.get("entity_name", ""),
+            "trust": item.get("trust", ""),
+            "scope_models": item.get("scope_models", []),
+            "scope_versions": item.get("scope_versions", []),
+            "sources": item.get("sources", []),
+        })
+    return {
+        "run_id": run.get("run_id"),
+        "idempotency_key": run.get("idempotency_key", ""),
+        "question": run.get("question", ""),
+        "execution_status": run.get("execution_status", ""),
+        "answer_status": run.get("answer_status", "service_error"),
+        "answer_text": run.get("answer_text", ""),
+        "clarifying_question": run.get("clarifying_question", ""),
+        "reason_code": run.get("reason_code", ""),
+        "citations": citations,
+        "evidence_snapshot": run.get("evidence_snapshot", []),
+        "retrieval_trace": run.get("retrieval_trace", {}),
+        "model": run.get("model", ""),
+        "prompt_version": run.get("prompt_version", ""),
+        "llm_requests": run.get("llm_requests", 0),
+        "latency_ms": run.get("latency_ms", 0),
+        "duplicate": bool(run.get("duplicate", False)),
+        "created_at": run.get("created_at"),
+    }
+
+
+@app.post("/api/v2/answers")
+def v2_create_answer(
+    payload: V2AnswerIn,
+    x_api_key: str | None = Header(None),
+    idempotency_key: str | None = Header(default=None),
+):
+    """Read-only internal QA: answer from trusted V2 Knowledge or refuse.
+
+    The same Idempotency-Key with the same question/context returns the stored
+    run without calling the model again; the same key with a different payload
+    is a 409.  Learning material still belongs in the Inbox, not here.
+    """
+
+    auth(x_api_key)
+    question = (payload.question or "").strip()
+    try:
+        run = answer_question(
+            question,
+            context=payload.context,
+            idempotency_key=(idempotency_key or "").strip() or None,
+            db_factory=db,
+            llm_service=llm,
+            embedding_client=embedder,
+        )
+    except (AnswerConflict, AnswerInProgress) as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return json_safe(_v2_answer_response(run))
+
+
+@app.get("/api/v2/answers/{run_id}")
+def v2_get_answer(run_id: int, x_api_key: str | None = Header(None)):
+    """Return a stored answer run with its immutable evidence snapshot."""
+
+    auth(x_api_key)
+    with db() as conn:
+        row = get_answer_run(conn, int(run_id))
+    if not row:
+        raise HTTPException(404, f"V2 answer run {int(run_id)} was not found")
+    return json_safe(_v2_answer_response(_run_to_dict(row)))
 
 
 def _review_complete_payload(payload: dict | None, candidate: dict) -> dict:

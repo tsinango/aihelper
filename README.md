@@ -22,8 +22,9 @@ INBOX_WORKER_HEALTHY_THRESHOLD_SECONDS=45
 
 ## V2 当前状态（截至 2026-09-05）
 
-V2 已完成 Phase 2.2 的生产闭环并正式收口，当前处于 **Phase 3.0**（收口 + 评测基线），
-下一阶段是 Phase 3.1 Read-only Internal QA。V2 Answer Service 尚未实现。
+V2 已完成 Phase 2.2 的生产闭环并正式收口，完成 Phase 3.0（收口 + 评测基线），
+并实现 Phase 3.1 Read-only Internal QA：内部工程师问答只读已确认 Knowledge。
+下一阶段是 Phase 3.2 feedback / Experience / Retest（尚未开始）。
 
 ```text
 Raw Evidence
@@ -80,8 +81,12 @@ Knowledge Graph editor 和 Telegram V2 接入不会进入当前 V2 主导航或�
 - `/inbox`：提交资料、查看处理状态、确认或编辑 Pending Knowledge。
 - `/knowledge`：维护已保存 Knowledge、来源、历史和 Entity Tree。
 - `/documents`：查看现有文档资产；文档学习管道仍未作为 V2 Learning 主入口。
-
-直接路由 `/chat` 保留作兼容页面，但 Grounded QA 尚未作为当前 V2 产品能力开放。
+- `/chat`：内部工程师问答页（Internal engineer draft）。`POST /api/v2/answers`
+  只从 eligible Knowledge（active + official_source/user_confirmed + accepted
+  supports 来源 + 无已知型号/版本冲突）生成答案草稿、澄清或拒答，并保存
+  `v2_answer_runs`（含 evidence snapshot）；`GET /api/v2/answers/{id}` 查看
+  历史。回答只读 Knowledge，不学习、不产生 Experience、不修改 Knowledge。
+  学习资料仍进入 Inbox。
 
 ## V2 评测基线（Phase 3.0）
 

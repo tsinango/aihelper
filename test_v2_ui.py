@@ -6,7 +6,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).parent
 PAGES = ("inbox.html", "knowledge.html", "documents.html", "chat.html")
-INTERACTIVE_PAGES = ("inbox.html", "chat.html")
+LEARNING_REPLY_PAGES = ("inbox.html",)
 KEY_SETTINGS_PAGES = PAGES
 
 
@@ -37,7 +37,7 @@ class V2UiTest(unittest.TestCase):
         self.assertIn("[sources]", knowledge)
 
     def test_learning_quick_replies_only_follow_latest_assistant_question(self):
-        for page in INTERACTIVE_PAGES:
+        for page in LEARNING_REPLY_PAGES:
             content = (ROOT / "templates" / page).read_text()
             for label in ("对", "查看并编辑", "不知道", "跳过"):
                 self.assertIn(label, content, page)
@@ -52,6 +52,21 @@ class V2UiTest(unittest.TestCase):
         self.assertIn("/api/v2/inbox/threads/${encodeURIComponent(state.threadId)}/proposals", inbox)
         self.assertIn("/api/v2/inbox/proposals/${encodeURIComponent(proposal.id)}", inbox)
         self.assertIn("proposal-editor-close", inbox)
+
+    def test_chat_is_a_read_only_internal_qa_page(self):
+        content = (ROOT / "templates" / "chat.html").read_text()
+        # Questions go to the answer service, never to learning ingestion.
+        self.assertIn("api('/api/v2/answers'", content)
+        self.assertIn("Idempotency-Key", content)
+        self.assertIn("answer_status", content)
+        self.assertIn("needs_clarification", content)
+        self.assertIn("clarifying_question", content)
+        self.assertIn("service_error", content)
+        self.assertIn("citations", content)
+        self.assertIn("Internal engineer draft", content)
+        # Exactly one learning entry remains: forwarding material to the Inbox.
+        self.assertEqual(content.count("/api/v2/inbox/messages"), 1)
+        self.assertIn("转入 Inbox 学习", content)
 
     def test_api_key_is_a_compact_session_storage_setting(self):
         for page in KEY_SETTINGS_PAGES:
