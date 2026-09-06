@@ -19,7 +19,7 @@ The codebase is in transition between two generations:
   `/review/published`) where reviewers approve Telegram-derived support-case
   knowledge into published `verified_knowledge`. Only published knowledge may
   answer customers; historical case memory is recall/reviewer evidence only.
-- **V2** (Phases 1–4.1 implemented): a new Inbox-first
+- **V2** (Phases 1–4.2 implemented): a new Inbox-first
   learning loop under `v2/` with its own `v2_`-prefixed tables, pages
   (`/inbox`, `/knowledge`, `/documents`, `/chat`) and `/api/v2/*` routes.
   Knowledge carries one of four trust values (`official_source`,
@@ -69,8 +69,11 @@ systemd, batch jobs, review workflow), `TECHNICAL_STATUS_AND_REMEDIATION.md`
   confirm with revision checks, retest-as-new-run, human verdicts; confirm
   is pure database work with no LLM calls), `documents.py` (Phase 4.1
   structured PDF/PPTX intake: immutable versions, page/slide/table/image/
-  notes blocks over raw evidence, parse jobs), `document_processing.py`
-  (single-worker document job steps, inbox-first interleave), `organization.py` (small local
+  notes blocks over raw evidence, parse jobs),   `document_processing.py`
+  (single-worker document job steps, inbox-first interleave),
+  `document_learning.py` (Phase 4.2 section-context extraction, deterministic
+  citation/identifier validation, whole-unit proposals, explicit confirm to
+  validated Knowledge), `organization.py` (small local
   Entity organization; automatic LLM organization is off by default), and
   `retrieval.py` (small-corpus lexical + vector retrieval over `v2_knowledge`;
   `retrieve_for_answer()` is the separate eligibility-gated answer entry
@@ -93,6 +96,8 @@ systemd, batch jobs, review workflow), `TECHNICAL_STATUS_AND_REMEDIATION.md`
   `023_v2_documents.sql` adds Phase 4.1 intake (`v2_document_versions`,
   `v2_document_blocks`, `v2_document_jobs`, Knowledge
   `origin_document_version_id`/`validation_status` for later phases).
+  `024_v2_document_units.sql` adds Phase 4.2 unit fields (Knowledge +
+  proposal `details_json`, proposal `origin_document_version_id`).
   `apply_migration.py` records SHA-256 checksums in `schema_migrations` and
   rejects changed or out-of-tree migration files.
 - Batch/offline scripts (top level): `organize_telegram_knowledge.py`

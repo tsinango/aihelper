@@ -91,6 +91,19 @@ class V2UiTest(unittest.TestCase):
         self.assertIn("/api/v2/feedback/unresolved", content)
         self.assertIn("/close", content)
 
+    def test_document_learning_contract(self):
+        content = (ROOT / "templates" / "documents.html").read_text()
+        for marker in (
+            "learn-start", "proposals", "confirmProposal", "ordered_steps",
+            "/learn", "/proposals", "/document-proposals/", "/confirm",
+        ):
+            self.assertIn(marker, content)
+
+    def test_knowledge_unit_rendering_contract(self):
+        content = (ROOT / "templates" / "knowledge.html").read_text()
+        for marker in ("showUnit", "ordered_steps", "origin_document_version_id"):
+            self.assertIn(marker, content)
+
     def test_documents_upload_and_structure_contract(self):
         content = (ROOT / "templates" / "documents.html").read_text()
         for marker in (

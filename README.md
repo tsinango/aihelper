@@ -29,9 +29,11 @@ V2 已完成 Phase 2.2 的生产闭环并正式收口，完成 Phase 3.0（收�
 可信 Knowledge，复测创建新 run 并可人工判定；Inbox 增加未解决缺口筛选。
 Phase 4.1 已实现结构化 PDF/PPTX 接入：文件版本不可覆盖，页/幻灯片/表格/
 图片/备注进入结构块并在 Documents 页可检查，图片页明确标待人工，解析在
-单个 worker 的 inbox 空闲分支执行。文档单元暂不进入回答（Phase 4.2 接入
-提炼与确认后才可回答）。
-下一阶段是 Phase 4.2 完整文档 Knowledge Unit（尚未开始）。
+单个 worker 的 inbox 空闲分支执行。Phase 4.2 已实现文档提炼：按完整小节/
+相关幻灯片一次提炼多个完整技术单元（fact/procedure/rule/experience），
+引用与标识符由代码校验，提案经人工确认后成为 validated 可回答 Knowledge，
+回答资格要求文档单元 `validation_status='validated'`。
+下一阶段是 Phase 4.3 全文覆盖与质量（尚未开始）。
 
 ```text
 Raw Evidence

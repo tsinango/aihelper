@@ -263,6 +263,20 @@ Chat 回答卡新增纠正入口：`POST /api/v2/answers/{id}/feedback`
 回退：停用上传入口及 worker 文档分支，Phase 3 与旧 Inbox 不受影响；
 保留文件、块、来源。图片页/未知图表只标 `needs_review`，不进入回答。
 
+## V2 文档提炼（Phase 4.2）
+
+`POST /api/v2/documents/versions/{id}/learn` 按小节/相关幻灯片排队提炼
+任务（每上下文一个 job，幂等）；worker 逐个执行一次有界提炼
+（`EXTRACT_MAX_TOKENS=4000`），引用/标识符/结构由代码校验，不合格驳回；
+提案在 Documents 版本详情中整项确认（可编辑文本）后成为 `validated`
+可回答 Knowledge。确认幂等，`GET .../proposals` 查看整项与来源块。
+
+注意：默认学习模型 `openai/gpt-oss-20b:free`（`V2_LEARNING_MODEL` 未设置时）
+已在 OpenRouter 免费层下线，worker 提炼任务会以 404 重试至失败，版本标
+`learning_failed`（旧文本学习同样受影响，需人工决策替换模型后 `retry`）。
+提炼入口本身与模型无关，验收时可用任一可用免费模型手动提炼，结果以
+`prompt_version` 记录为准。
+
 ## 本机 Qwen 离线评测
 
 本机 Qwen3.5-2B/4B 是临时的影子评测模型，不由 systemd 托管，也不接收

@@ -260,7 +260,9 @@ def _answer_eligible_rows(conn) -> list[dict]:
     redacted evidence cannot ground an answer even when the source link was
     accepted earlier.  Rows with an accepted contradicting source link are
     additionally excluded: a known conflict must never silently support an
-    answer draft.
+    answer draft.  Document-learned units additionally need an explicit
+    validation for their own version; pre-document rows (NULL origin) keep
+    the old trust/source gate.
     """
 
     with conn.cursor() as cur:
@@ -270,11 +272,14 @@ def _answer_eligible_rows(conn) -> list[dict]:
                    k.entity_name AS legacy_entity_name,
                    k.trust, k.active, k.embedding, k.embedding_model,
                    k.unit_kind, k.applicability, k.revision,
+                   k.origin_document_version_id, k.validation_status,
                    k.created_at, k.updated_at
             FROM v2_knowledge k
             LEFT JOIN v2_entities e ON e.id=k.entity_id
             WHERE k.active=TRUE
               AND k.trust IN ('official_source', 'user_confirmed')
+              AND (k.origin_document_version_id IS NULL
+                   OR k.validation_status='validated')
               AND EXISTS (
                     SELECT 1 FROM v2_knowledge_sources s
                     JOIN v2_raw_evidence r ON r.id=s.raw_evidence_id

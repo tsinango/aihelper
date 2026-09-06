@@ -464,6 +464,8 @@ def _list_knowledge(
             SELECT k.id, k.title, k.content, k.entity_name, k.entity_id,
                    e.name AS entity_display_name, k.trust,
                    k.active, k.created_at, k.updated_at,
+                   k.unit_kind, k.applicability, k.revision, k.details_json,
+                   k.origin_document_version_id, k.validation_status,
                    count(s.raw_evidence_id) AS source_count
             FROM v2_knowledge k
             LEFT JOIN v2_entities e ON e.id=k.entity_id
@@ -515,6 +517,9 @@ def _knowledge_snapshot(row: dict) -> dict:
         "unit_kind": str(row.get("unit_kind") or ""),
         "applicability": row.get("applicability") or {},
         "revision": row.get("revision"),
+        "details_json": row.get("details_json") or {},
+        "origin_document_version_id": row.get("origin_document_version_id"),
+        "validation_status": row.get("validation_status"),
     }
 
 
@@ -525,7 +530,7 @@ def _write_knowledge_history(
     before: dict,
     after: dict,
 ) -> None:
-    if action not in {"edit", "deactivate", "restore", "move"}:
+    if action not in {"edit", "deactivate", "restore", "move", "confirm"}:
         raise ValueError(f"unknown Knowledge history action: {action}")
     with conn.cursor() as cur:
         cur.execute(
@@ -543,7 +548,8 @@ def _load_knowledge_for_maintenance(conn, knowledge_id: int) -> dict:
         cur.execute(
             """
             SELECT id, title, content, entity_name, entity_id, trust, active,
-                   unit_kind, applicability, revision,
+                   unit_kind, applicability, revision, details_json,
+                   origin_document_version_id, validation_status,
                    created_at, updated_at
             FROM v2_knowledge
             WHERE id=%s
@@ -574,12 +580,13 @@ def edit_knowledge(
     content: str,
     entity_id: int | None,
     applicability: dict | None = None,
+    details_json: dict | None = None,
 ) -> dict:
     """Deterministically edit one Knowledge row; no LLM or embedding call.
 
-    Any content, applicability, or entity change bumps ``revision`` and
-    records history; content/applicability changes also clear the embedding
-    so the stale vector can never support an answer.
+    Any content, applicability, details, or entity change bumps ``revision``
+    and records history; content/applicability/details changes also clear
+    the embedding so the stale vector can never support an answer.
     """
 
     clean = str(content or "").strip()
@@ -587,6 +594,8 @@ def edit_knowledge(
         raise ValueError("Knowledge content must contain 1-12000 characters")
     if applicability is not None and not isinstance(applicability, dict):
         raise ValueError("Knowledge applicability must be a JSON object")
+    if details_json is not None and not isinstance(details_json, dict):
+        raise ValueError("Knowledge details must be a JSON object")
     current = _load_knowledge_for_maintenance(conn, int(knowledge_id))
     if not current.get("active"):
         raise ValueError("deleted Knowledge must be restored before editing")
@@ -599,27 +608,38 @@ def edit_knowledge(
         and {str(key): applicability[key] for key in applicability}
         != dict(old_snapshot.get("applicability") or {})
     )
-    if not content_changed and not entity_changed and not applicability_changed:
+    details_changed = (
+        details_json is not None
+        and {str(key): details_json[key] for key in details_json}
+        != dict(old_snapshot.get("details_json") or {})
+    )
+    if not content_changed and not entity_changed and not applicability_changed and not details_changed:
         return current
     new_applicability = (
         {str(key): applicability[key] for key in applicability}
         if applicability is not None
         else dict(old_snapshot.get("applicability") or {})
     )
+    new_details = (
+        {str(key): details_json[key] for key in details_json}
+        if details_json is not None
+        else dict(old_snapshot.get("details_json") or {})
+    )
     with conn.cursor() as cur:
-        if content_changed or applicability_changed:
+        if content_changed or applicability_changed or details_changed:
             cur.execute(
                 """
                 UPDATE v2_knowledge
-                SET content=%s, entity_id=%s, applicability=%s,
+                SET content=%s, entity_id=%s, applicability=%s, details_json=%s,
                     embedding=NULL, embedding_model=NULL,
                     revision=revision+1, updated_at=CURRENT_TIMESTAMP
                 WHERE id=%s AND active=TRUE
                 RETURNING id, title, content, entity_name, entity_id, trust, active,
-                          unit_kind, applicability, revision,
+                          unit_kind, applicability, revision, details_json,
+                          origin_document_version_id, validation_status,
                           created_at, updated_at
                 """,
-                (clean, entity_id, Jsonb(new_applicability), int(knowledge_id)),
+                (clean, entity_id, Jsonb(new_applicability), Jsonb(new_details), int(knowledge_id)),
             )
         else:
             cur.execute(
@@ -628,7 +648,8 @@ def edit_knowledge(
                 SET entity_id=%s, revision=revision+1, updated_at=CURRENT_TIMESTAMP
                 WHERE id=%s AND active=TRUE
                 RETURNING id, title, content, entity_name, entity_id, trust, active,
-                          unit_kind, applicability, revision,
+                          unit_kind, applicability, revision, details_json,
+                          origin_document_version_id, validation_status,
                           created_at, updated_at
                 """,
                 (entity_id, int(knowledge_id)),

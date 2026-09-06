@@ -86,8 +86,10 @@ def main() -> None:
     def run_document_job(job_id: int) -> None:
         # Phase 4.1 document steps are local parse work: no LLM needed, and
         # one job finishes one version step without holding worker capacity
-        # across network calls.
-        process_document_job(int(job_id), db_factory=db, base_dir=document_dir)
+        # across network calls.  Phase 4.2 learn steps run one bounded
+        # extraction per claim.
+        process_document_job(int(job_id), db_factory=db, base_dir=document_dir,
+                             stages=("parse", "learn"), llm_service=llm)
 
     stop_event = threading.Event()
     heartbeat = threading.Thread(
@@ -111,8 +113,11 @@ def main() -> None:
                 if job_ids:
                     run_job(job_ids[0])
                     continue
+                # Learn steps need the model; without it only parse locally so
+                # learn jobs never burn their retry budget on a dead client.
+                stages = ("parse", "learn") if llm is not None else ("parse",)
                 with db() as conn:
-                    document_job = claim_document_job(conn, ("parse",))
+                    document_job = claim_document_job(conn, stages)
                     conn.commit()
                 if document_job:
                     run_document_job(int(document_job["id"]))

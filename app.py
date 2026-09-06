@@ -99,6 +99,14 @@ from v2.documents import (
     retry_document_job,
     version_file_path,
 )
+from v2.document_learning import (
+    DocumentLearnError,
+    DocumentLearnNotFound,
+    confirm_document_proposal,
+    get_document_proposal,
+    list_document_proposals,
+    queue_learn_jobs,
+)
 from v2.processing import (
     enqueue_inbox_job,
     process_inbox_job,
@@ -172,6 +180,12 @@ class V2VerdictIn(BaseModel):
     verdict: str = Field(min_length=1, max_length=10)
     reason: str = Field(default="", max_length=2000)
     reviewer_label: str = Field(default="", max_length=200)
+
+
+class V2DocumentProposalConfirmIn(BaseModel):
+    content: str | None = Field(default=None, max_length=13000)
+    details: dict | None = Field(default=None)
+    applicability: dict | None = Field(default=None)
 
 
 def _process_v2_inbox_job(job_id: int) -> None:
@@ -1993,9 +2007,17 @@ def v2_edit_knowledge(
             raise HTTPException(400, "entity_id must be an integer or null") from exc
         if entity_id <= 0:
             raise HTTPException(400, "entity_id must be a positive integer or null")
+    applicability = body.get("applicability")
+    if applicability is not None and not isinstance(applicability, dict):
+        raise HTTPException(400, "applicability must be a JSON object")
+    details = body.get("details_json", body.get("details"))
+    if details is not None and not isinstance(details, dict):
+        raise HTTPException(400, "details must be a JSON object")
     try:
         with db() as conn:
-            return json_safe(edit_knowledge(conn, int(knowledge_id), content, entity_id))
+            return json_safe(edit_knowledge(conn, int(knowledge_id), content, entity_id,
+                                            applicability=applicability,
+                                            details_json=details))
     except V2NotFound as exc:
         raise HTTPException(404, str(exc)) from exc
     except ValueError as exc:
@@ -2286,6 +2308,103 @@ def v2_retry_document_job(job_id: int, x_api_key: str | None = Header(None)):
     return json_safe({"job_id": job.get("id"), "status": job.get("status", "")})
 
 
+def _v2_document_proposal_view(proposal: dict) -> dict:
+    return {
+        "proposal_id": proposal.get("id"),
+        "fact_text": proposal.get("fact_text", ""),
+        "unit_kind": proposal.get("unit_kind", ""),
+        "applicability": proposal.get("applicability") or {},
+        "details": proposal.get("details_json") or {},
+        "status": proposal.get("status", ""),
+        "comparison_result": proposal.get("comparison_result", ""),
+        "origin_document_version_id": proposal.get("origin_document_version_id"),
+        "confirmed_knowledge_id": proposal.get("confirmed_knowledge_id"),
+        "created_at": proposal.get("created_at"),
+        "updated_at": proposal.get("updated_at"),
+    }
+
+
+@app.post("/api/v2/documents/versions/{version_id}/learn")
+def v2_learn_document_version(version_id: int, x_api_key: str | None = Header(None)):
+    """Queue one learn job per section context; the worker extracts units.
+
+    Idempotent per context key: re-posting after a crash only queues the
+    contexts still missing jobs.  Nothing becomes answerable until an
+    engineer confirms each proposal below.
+    """
+
+    auth(x_api_key)
+    try:
+        with db() as conn:
+            jobs = queue_learn_jobs(conn, int(version_id))
+    except DocumentLearnNotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return json_safe({"version_id": int(version_id), "queued": jobs, "total": len(jobs)})
+
+
+@app.get("/api/v2/documents/versions/{version_id}/proposals")
+def v2_document_proposals(version_id: int, x_api_key: str | None = Header(None)):
+    """Whole-unit proposals with structure, sources, and confirm state."""
+
+    auth(x_api_key)
+    with db() as conn:
+        version = get_version(conn, int(version_id))
+        if not version:
+            raise HTTPException(404, f"V2 document version {int(version_id)} was not found")
+        proposals = list_document_proposals(conn, int(version_id))
+    return json_safe({
+        "version_id": int(version_id),
+        "items": [_v2_document_proposal_view(proposal) for proposal in proposals],
+        "total": len(proposals),
+    })
+
+
+@app.get("/api/v2/document-proposals/{proposal_id}")
+def v2_document_proposal(proposal_id: int, x_api_key: str | None = Header(None)):
+    auth(x_api_key)
+    with db() as conn:
+        proposal = get_document_proposal(conn, int(proposal_id))
+    if not proposal:
+        raise HTTPException(404, f"V2 document proposal {int(proposal_id)} was not found")
+    return json_safe(_v2_document_proposal_view(proposal))
+
+
+@app.post("/api/v2/document-proposals/{proposal_id}/confirm")
+def v2_confirm_document_proposal(
+    proposal_id: int,
+    payload: V2DocumentProposalConfirmIn,
+    x_api_key: str | None = Header(None),
+):
+    """Confirm one whole unit into validated, answerable Knowledge.
+
+    Idempotent: repeating the confirm returns the same Knowledge row.
+    Edited details without content re-render content deterministically.
+    """
+
+    auth(x_api_key)
+    try:
+        with db() as conn:
+            knowledge, duplicate = confirm_document_proposal(
+                conn,
+                int(proposal_id),
+                content=payload.content,
+                details=payload.details,
+                applicability=payload.applicability,
+            )
+    except DocumentLearnNotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except DocumentLearnError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return json_safe({
+        "knowledge_id": knowledge.get("id"),
+        "trust": knowledge.get("trust", ""),
+        "unit_kind": knowledge.get("unit_kind", ""),
+        "revision": knowledge.get("revision"),
+        "validation_status": knowledge.get("validation_status", ""),
+        "duplicate": duplicate,
+    })
+
+
 @app.get("/api/v2/chat")
 def v2_chat(x_api_key: str | None = Header(None)):
     auth(x_api_key)
@@ -2305,6 +2424,7 @@ def _v2_answer_response(run: dict) -> dict:
             "title": item.get("title", ""),
             "entity_name": item.get("entity_name", ""),
             "trust": item.get("trust", ""),
+            "unit_kind": item.get("unit_kind", ""),
             "scope_models": item.get("scope_models", []),
             "scope_versions": item.get("scope_versions", []),
             "sources": item.get("sources", []),
