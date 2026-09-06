@@ -402,13 +402,25 @@ def summary(conn) -> dict:
             """
         )
         pending_count = int(cur.fetchone()["count"])
+        # The feedback table arrives with migration 022; to_regclass keeps
+        # pre-022 databases working without poisoning the transaction.
+        cur.execute("SELECT to_regclass('public.v2_answer_feedback') AS name")
+        has_feedback = (cur.fetchone() or {}).get("name") is not None
+        gap_count = 0
+        if has_feedback:
+            cur.execute(
+                """
+                SELECT count(*) AS count
+                FROM v2_answer_feedback
+                WHERE status='open'
+                """
+            )
+            gap_count = int(cur.fetchone()["count"])
     return {
         "knowledge_count": knowledge_count,
         "week_new_count": week_count,
         "pending_count": pending_count,
-        # Gaps are introduced in Phase 3; keeping this explicit avoids
-        # pretending that Phase 1 already has a refusal loop.
-        "unresolved_gap_count": 0,
+        "unresolved_gap_count": gap_count,
     }
 
 
@@ -499,6 +511,10 @@ def _knowledge_snapshot(row: dict) -> dict:
         "content": str(row.get("content") or ""),
         "entity_id": row.get("entity_id"),
         "active": bool(row.get("active")),
+        "trust": str(row.get("trust") or ""),
+        "unit_kind": str(row.get("unit_kind") or ""),
+        "applicability": row.get("applicability") or {},
+        "revision": row.get("revision"),
     }
 
 
@@ -527,6 +543,7 @@ def _load_knowledge_for_maintenance(conn, knowledge_id: int) -> dict:
         cur.execute(
             """
             SELECT id, title, content, entity_name, entity_id, trust, active,
+                   unit_kind, applicability, revision,
                    created_at, updated_at
             FROM v2_knowledge
             WHERE id=%s
@@ -556,12 +573,20 @@ def edit_knowledge(
     knowledge_id: int,
     content: str,
     entity_id: int | None,
+    applicability: dict | None = None,
 ) -> dict:
-    """Deterministically edit one Knowledge row; no LLM or embedding call."""
+    """Deterministically edit one Knowledge row; no LLM or embedding call.
+
+    Any content, applicability, or entity change bumps ``revision`` and
+    records history; content/applicability changes also clear the embedding
+    so the stale vector can never support an answer.
+    """
 
     clean = str(content or "").strip()
     if not clean or len(clean) > 12000:
         raise ValueError("Knowledge content must contain 1-12000 characters")
+    if applicability is not None and not isinstance(applicability, dict):
+        raise ValueError("Knowledge applicability must be a JSON object")
     current = _load_knowledge_for_maintenance(conn, int(knowledge_id))
     if not current.get("active"):
         raise ValueError("deleted Knowledge must be restored before editing")
@@ -569,28 +594,41 @@ def edit_knowledge(
     old_snapshot = _knowledge_snapshot(current)
     content_changed = clean != old_snapshot["content"]
     entity_changed = entity_id != old_snapshot["entity_id"]
-    if not content_changed and not entity_changed:
+    applicability_changed = (
+        applicability is not None
+        and {str(key): applicability[key] for key in applicability}
+        != dict(old_snapshot.get("applicability") or {})
+    )
+    if not content_changed and not entity_changed and not applicability_changed:
         return current
+    new_applicability = (
+        {str(key): applicability[key] for key in applicability}
+        if applicability is not None
+        else dict(old_snapshot.get("applicability") or {})
+    )
     with conn.cursor() as cur:
-        if content_changed:
+        if content_changed or applicability_changed:
             cur.execute(
                 """
                 UPDATE v2_knowledge
-                SET content=%s, entity_id=%s, embedding=NULL, embedding_model=NULL,
-                    updated_at=CURRENT_TIMESTAMP
+                SET content=%s, entity_id=%s, applicability=%s,
+                    embedding=NULL, embedding_model=NULL,
+                    revision=revision+1, updated_at=CURRENT_TIMESTAMP
                 WHERE id=%s AND active=TRUE
                 RETURNING id, title, content, entity_name, entity_id, trust, active,
+                          unit_kind, applicability, revision,
                           created_at, updated_at
                 """,
-                (clean, entity_id, int(knowledge_id)),
+                (clean, entity_id, Jsonb(new_applicability), int(knowledge_id)),
             )
         else:
             cur.execute(
                 """
                 UPDATE v2_knowledge
-                SET entity_id=%s, updated_at=CURRENT_TIMESTAMP
+                SET entity_id=%s, revision=revision+1, updated_at=CURRENT_TIMESTAMP
                 WHERE id=%s AND active=TRUE
                 RETURNING id, title, content, entity_name, entity_id, trust, active,
+                          unit_kind, applicability, revision,
                           created_at, updated_at
                 """,
                 (entity_id, int(knowledge_id)),

@@ -120,6 +120,12 @@ def _run_to_dict(row: dict) -> dict:
         "prompt_version": str(row.get("prompt_version") or ""),
         "llm_requests": int(row.get("llm_requests") or 0),
         "latency_ms": int(row.get("latency_ms") or 0),
+        "retest_of": row.get("retest_of"),
+        "feedback_id": row.get("feedback_id"),
+        "reviewer_verdict": row.get("reviewer_verdict"),
+        "reviewer_reason": str(row.get("reviewer_reason") or ""),
+        "reviewer_label": str(row.get("reviewer_label") or ""),
+        "reviewed_at": _iso(row.get("reviewed_at")),
         "created_at": _iso(row.get("created_at")),
         "updated_at": _iso(row.get("updated_at")),
     }
@@ -129,7 +135,9 @@ _RUN_COLUMNS = (
     "id, idempotency_key, question, context_json, request_hash, "
     "execution_status, answer_status, answer_text, clarifying_question, "
     "reason_code, evidence_snapshot, retrieval_trace, model, prompt_version, "
-    "llm_requests, latency_ms, created_at, updated_at"
+    "llm_requests, latency_ms, retest_of, feedback_id, "
+    "reviewer_verdict, reviewer_reason, reviewer_label, reviewed_at, "
+    "created_at, updated_at"
 )
 
 
@@ -153,7 +161,8 @@ def get_answer_run(conn, run_id: int) -> dict | None:
     return dict(row) if row else None
 
 
-def _insert_started_run(conn, *, key: str, question: str, context: dict, payload_hash: str) -> dict:
+def _insert_started_run(conn, *, key: str, question: str, context: dict, payload_hash: str,
+                        retest_of: int | None = None, feedback_id: int | None = None) -> dict:
     from psycopg.types.json import Jsonb
 
     with conn.cursor() as cur:
@@ -161,11 +170,13 @@ def _insert_started_run(conn, *, key: str, question: str, context: dict, payload
             """
             INSERT INTO v2_answer_runs(
                 idempotency_key, question, context_json, request_hash,
-                execution_status, answer_status, model, prompt_version
-            ) VALUES(%s, %s, %s, %s, 'started', 'service_error', %s, %s)
+                execution_status, answer_status, model, prompt_version,
+                retest_of, feedback_id
+            ) VALUES(%s, %s, %s, %s, 'started', 'service_error', %s, %s, %s, %s)
             RETURNING id
             """,
-            (key, question, Jsonb(context), payload_hash, V2_ANSWER_MODEL, V2_ANSWER_PROMPT_VERSION),
+            (key, question, Jsonb(context), payload_hash, V2_ANSWER_MODEL, V2_ANSWER_PROMPT_VERSION,
+             retest_of, feedback_id),
         )
         run_id = int(cur.fetchone()["id"])
     row = get_answer_run(conn, run_id)
@@ -253,6 +264,8 @@ def _evidence_payload(candidates: list[dict]) -> list[dict]:
             "content": _text(candidate.get("content"), 2000),
             "entity": _text(candidate.get("entity_name"), 200),
             "trust": str(candidate.get("trust") or ""),
+            "unit_kind": str(candidate.get("unit_kind") or ""),
+            "applicability": candidate.get("applicability") or {},
             "sources": [
                 {
                     "source_kind": str(item.get("source_kind") or ""),
@@ -455,8 +468,12 @@ def build_evidence_snapshot(candidates: list[dict], indexes: list[int]) -> list[
         snapshot.append({
             "evidence_index": index,
             "knowledge_id": int(candidate["id"]),
-            "knowledge_revision": _iso(candidate.get("updated_at")),
+            "knowledge_revision": candidate.get("revision")
+            if isinstance(candidate.get("revision"), int) else None,
+            "knowledge_updated_at": _iso(candidate.get("updated_at")),
             "trust": str(candidate.get("trust") or ""),
+            "unit_kind": str(candidate.get("unit_kind") or ""),
+            "applicability": candidate.get("applicability") or {},
             "title": _text(candidate.get("title"), 500),
             "content": _text(candidate.get("content")),
             "entity_name": _text(candidate.get("entity_name"), 500),
@@ -489,6 +506,8 @@ def answer_question(
     llm_service=None,
     embedding_client=None,
     top_k: int = 5,
+    retest_of: int | None = None,
+    feedback_id: int | None = None,
 ) -> dict:
     """Answer one internal question; see the module docstring for the contract."""
 
@@ -516,6 +535,7 @@ def answer_question(
                 run = _insert_started_run(
                     conn, key=key, question=clean_question,
                     context=clean_context, payload_hash=payload_hash,
+                    retest_of=retest_of, feedback_id=feedback_id,
                 )
             except UniqueViolation:
                 conn.rollback()

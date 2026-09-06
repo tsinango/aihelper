@@ -231,6 +231,22 @@ snapshot、latency 和确定性 critical flags；`human_verdict` 始终留空，
 `--tag` 覆盖幂等键前缀（默认 `phase31-YYYYMMDD`）；同一 tag 重跑会命中幂等
 返回已存 run，不重复调用模型。
 
+## V2 纠正闭环（Phase 3.2）
+
+Chat 回答卡新增纠正入口：`POST /api/v2/answers/{id}/feedback`
+（`reply_only` 仅本次使用不碰 Knowledge；`save_experience` 暂存提案；
+另有缺资料/召回失败/生成失败/现场成功/失败等缺口分类），
+`POST /api/v2/feedback/{id}/confirm`（明确确认 Experience 为
+`user_confirmed`，幂等，更新目标需 revision 一致），
+`POST /api/v2/feedback/{id}/retest`（永远建新 run，不覆盖旧 run），
+`PATCH /api/v2/answers/{id}/verdict`（人工 pass/fail），
+`GET /api/v2/feedback/unresolved`（Inbox 未解决缺口筛选）。
+生产验收证据：`data/phase32_acceptance.json`（gitignored，不入库）。
+
+回退：停用 Chat 纠正按钮与上述 feedback 入口即可回到 3.1 只读问答；
+已确认的 Experience 与历史记录保留，不删除。迁移 022 只加表/加列，
+无回填，不阻塞旧版本代码读取（新列均有 DEFAULT）。
+
 ## 本机 Qwen 离线评测
 
 本机 Qwen3.5-2B/4B 是临时的影子评测模型，不由 systemd 托管，也不接收

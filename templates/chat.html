@@ -10,6 +10,14 @@
 <style>
   .nav { overflow-x: auto; }
   .nav a { white-space: nowrap; }
+  .correct-box{margin-top:14px;border-top:1px solid var(--line);padding-top:12px}
+  .correct-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  .correct-form{margin-top:10px;display:grid;gap:8px}
+  .correct-form textarea{width:100%;min-height:110px;border:1px solid #cbd5e1;border-radius:9px;padding:10px 12px;resize:vertical}
+  .correct-form select,.correct-form input{border:1px solid #cbd5e1;border-radius:8px;padding:7px 9px;max-width:100%}
+  .feedback-line{margin-top:8px;font-size:13px;color:var(--muted)}
+  .feedback-line strong{color:var(--text)}
+  .verdict-row{display:flex;gap:8px;margin-top:8px;align-items:center;flex-wrap:wrap}
   .key-settings{margin-left:auto;color:var(--muted);font-size:12px;position:relative}.key-settings summary{cursor:pointer;list-style:none;padding:7px 9px;border:1px solid transparent;border-radius:8px;white-space:nowrap}.key-settings summary::-webkit-details-marker{display:none}.key-settings summary::after{content:'⌄';margin-left:5px}.key-settings[open] summary{border-color:#cbd5e1;background:#f8fafc}.key-panel{position:absolute;right:0;top:calc(100% + 6px);z-index:2;display:grid;grid-template-columns:auto minmax(150px,1fr) auto;align-items:center;gap:8px;width:min(360px,calc(100vw - 20px));padding:10px;background:#fff;border:1px solid var(--line);border-radius:9px;box-shadow:0 8px 22px #1018281a}.key-panel input{min-width:0;border:1px solid #cbd5e1;border-radius:7px;padding:7px 8px}.key-panel input:focus{outline:2px solid #bfdbfe;border-color:var(--blue)}
 </style>
 </head>
@@ -39,6 +47,53 @@
         <div id="result-text" class="answer"></div>
         <ul id="result-sources" class="sources"></ul>
         <div id="result-meta" class="meta"></div>
+        <div id="correct-box" class="correct-box">
+          <div class="correct-row">
+            <button id="correct-toggle" type="button">纠正答案</button>
+            <button id="feedback-history" type="button" title="查看该回答的全部历史纠正">历史纠正</button>
+            <span id="verdict-view" class="meta"></span>
+          </div>
+          <div id="correct-form" class="correct-form" hidden>
+            <textarea id="correct-text" aria-label="纠正后的完整文本"></textarea>
+            <div class="correct-row">
+              <select id="correct-kind" aria-label="纠正类型">
+                <option value="reply_only">仅本次使用（不改 Knowledge）</option>
+                <option value="save_experience">保存为 Experience（需确认）</option>
+                <option value="missing_information">缺资料</option>
+                <option value="retrieval_failure">召回失败（知识在库但没选中）</option>
+                <option value="generation_failure">生成失败（证据对但答案错）</option>
+                <option value="field_result_success">现场验证成功</option>
+                <option value="field_result_failure">现场验证失败</option>
+              </select>
+              <input id="correct-models" placeholder="适用型号，逗号分隔，可空" aria-label="适用型号">
+            </div>
+            <div class="correct-row">
+              <button id="correct-submit" class="primary" type="button">提交纠正</button>
+            </div>
+          </div>
+          <div id="feedback-line" class="feedback-line"></div>
+          <div id="confirm-row" class="correct-row" hidden>
+            <button id="confirm-submit" class="primary" type="button">确认保存为 Experience</button>
+          </div>
+          <div id="retest-row" class="correct-row" hidden>
+            <button id="retest-submit" type="button">用当前知识重新测试</button>
+          </div>
+        </div>
+      </div>
+    </section>
+    <section class="card" id="retest-card" hidden>
+      <header class="card-head"><h1>复测对比</h1><p id="retest-sub">—</p></header>
+      <div class="card-body">
+        <span id="retest-status" class="status">—</span>
+        <div id="retest-text" class="answer"></div>
+        <ul id="retest-sources" class="sources"></ul>
+        <div id="retest-meta" class="meta"></div>
+        <div class="verdict-row">
+          <span>人工判定复测：</span>
+          <button id="verdict-pass" type="button">通过</button>
+          <button id="verdict-fail" type="button">失败</button>
+          <span id="verdict-status" class="meta"></span>
+        </div>
       </div>
     </section>
   </main>
@@ -158,11 +213,29 @@
         `model=${value(data, 'model')} prompt=${value(data, 'prompt_version')}` +
         ` latency=${value(data, 'latency_ms')}ms llm_calls=${value(data, 'llm_requests')}` +
         (data.duplicate ? ' · 幂等命中（未重复调用模型）' : '');
+      const verdict = value(data, 'reviewer_verdict');
+      $('verdict-view').textContent = verdict ? `人工判定：${verdict === 'pass' ? '通过' : '失败'}` : '';
+      feedbackState.run = data;
+      feedbackState.feedback = null;
+      feedbackLine('');
+      $('confirm-row').hidden = true;
+      $('retest-row').hidden = true;
+      $('retest-card').hidden = true;
+      $('correct-form').hidden = true;
       card.scrollIntoView({behavior: 'smooth', block: 'nearest'});
     }
 
     function showError(message) { $('error').textContent = message; $('error').hidden = false; }
     function clearError() { $('error').hidden = true; }
+
+    const feedbackState = {run: null, feedback: null, feedbackKey: ''};
+
+    function feedbackLine(html) { $('feedback-line').innerHTML = html; }
+
+    function applicabilityFromInput() {
+      const models = $('correct-models').value.split(/[,，]/).map(s => s.trim()).filter(Boolean);
+      return models.length ? {models} : {};
+    }
 
     async function ask(question) {
       const button = document.querySelector('#composer button.primary');
@@ -183,8 +256,141 @@
       }
     }
 
-    async function sendToInbox(content) {
+    function currentAnswerText() {
+      const run = feedbackState.run || {};
+      return String(run.answer_text || run.clarifying_question || '');
+    }
+
+    async function submitFeedback() {
+      const run = feedbackState.run;
+      if (!run || !run.run_id) return;
+      const kind = $('correct-kind').value;
+      const text = $('correct-text').value.trim();
+      if ((kind === 'reply_only' || kind === 'save_experience') && !text) {
+        feedbackLine('纠正文本不能为空。');
+        return;
+      }
       clearError();
+      feedbackState.feedbackKey = feedbackState.feedbackKey || uuid();
+      try {
+        const data = await api(`/api/v2/answers/${encodeURIComponent(run.run_id)}/feedback`, {
+          method: 'POST',
+          headers: {'Idempotency-Key': feedbackState.feedbackKey},
+          body: JSON.stringify({
+            feedback_kind: kind, correction_text: text,
+            applicability: applicabilityFromInput(),
+          }),
+        });
+        feedbackState.feedback = data;
+        if (kind === 'reply_only') {
+          feedbackLine(`已保存为<strong>本次回复</strong>（feedback ${value(data, 'feedback_id')}），Knowledge 未修改。`);
+        } else if (kind === 'save_experience') {
+          $('correct-text').value = String(value(data, 'correction_text'));
+          feedbackLine(`Experience 已暂存为提案（feedback ${value(data, 'feedback_id')}），请核对文本后点<strong>确认保存</strong>。确认后 Knowledge 变为 user_confirmed。`);
+          $('confirm-row').hidden = false;
+        } else {
+          feedbackLine(`已记录为<strong>${kind}</strong>（feedback ${value(data, 'feedback_id')}），进入未解决缺口队列。`);
+        }
+        if (kind !== 'reply_only') $('retest-row').hidden = false;
+      } catch (error) {
+        feedbackLine('');
+        showError(error.message);
+      }
+    }
+
+    async function confirmExperience() {
+      const feedback = feedbackState.feedback;
+      if (!feedback || !feedback.feedback_id) return;
+      clearError();
+      try {
+        const data = await api(`/api/v2/feedback/${encodeURIComponent(feedback.feedback_id)}/confirm`, {
+          method: 'POST',
+          body: JSON.stringify({confirmed_text: $('correct-text').value.trim() || null}),
+        });
+        feedbackLine(`已确认为 <strong>user_confirmed</strong> Knowledge K${value(data, 'knowledge_id')}（revision ${value(data, 'revision')})${data.duplicate ? ' · 幂等命中，未重复保存' : ''}。可用“重新测试”验证。`);
+        $('confirm-row').hidden = true;
+        $('retest-row').hidden = false;
+      } catch (error) {
+        showError(error.message);
+      }
+    }
+
+    function renderRetest(data) {
+      const card = $('retest-card');
+      card.hidden = false;
+      const status = String(value(data, 'answer_status') || 'service_error');
+      const badge = $('retest-status');
+      badge.className = 'status ' + status;
+      badge.textContent = STATUS_TEXT[status] || status;
+      $('retest-text').textContent = status === 'answered'
+        ? String(value(data, 'answer_text'))
+        : status === 'needs_clarification'
+          ? String(value(data, 'clarifying_question'))
+          : '复测仍无法回答：' + String(value(data, 'reason_code') || '');
+      $('retest-sub').textContent = `run ${value(data, 'run_id')} · retest_of ${value(data, 'retest_of')} · ${value(data, 'reason_code')}`;
+      const box = $('retest-sources');
+      box.replaceChildren();
+      for (const item of (Array.isArray(data.citations) ? data.citations : [])) {
+        const row = document.createElement('li');
+        row.textContent = `K${value(item, 'knowledge_id')} · ${value(item, 'title') || '（无标题）'}`;
+        box.append(row);
+      }
+      $('retest-meta').textContent =
+        `model=${value(data, 'model')} prompt=${value(data, 'prompt_version')}` +
+        ` latency=${value(data, 'latency_ms')}ms llm_calls=${value(data, 'llm_requests')}`;
+      card.scrollIntoView({behavior: 'smooth', block: 'nearest'});
+    }
+
+    async function retestAnswer() {
+      const feedback = feedbackState.feedback;
+      if (!feedback || !feedback.feedback_id) return;
+      clearError();
+      try {
+        const data = await api(`/api/v2/feedback/${encodeURIComponent(feedback.feedback_id)}/retest`, {
+          method: 'POST',
+          headers: {'Idempotency-Key': uuid()},
+          body: '{}',
+        });
+        renderRetest(data);
+        $('verdict-status').textContent = '';
+      } catch (error) {
+        showError(error.message);
+      }
+    }
+
+    async function sendVerdict(verdict) {
+      const runId = Number(($('retest-sub').textContent.match(/run (\d+)/) || [])[1] || 0);
+      if (!runId) return;
+      clearError();
+      try {
+        const data = await api(`/api/v2/answers/${encodeURIComponent(runId)}/verdict`, {
+          method: 'PATCH',
+          body: JSON.stringify({verdict}),
+        });
+        $('verdict-status').textContent = `已记录：${value(data, 'reviewer_verdict') === 'pass' ? '通过' : '失败'}`;
+      } catch (error) {
+        showError(error.message);
+      }
+    }
+
+    async function showFeedbackHistory() {
+      const run = feedbackState.run;
+      if (!run || !run.run_id) return;
+      clearError();
+      try {
+        const data = await api(`/api/v2/answers/${encodeURIComponent(run.run_id)}/feedback`);
+        const items = Array.isArray(data.items) ? data.items : [];
+        if (!items.length) { feedbackLine('该回答暂无纠正记录。'); return; }
+        feedbackLine(items.map(item =>
+          `#${value(item, 'feedback_id')} ${value(item, 'feedback_kind')} · ${value(item, 'status')}` +
+          (value(item, 'knowledge_id') ? ` · K${value(item, 'knowledge_id')}` : '')
+        ).join('<br>'));
+      } catch (error) {
+        showError(error.message);
+      }
+    }
+
+    async function sendToInbox(content) {      clearError();
       try {
         const data = await api('/api/v2/inbox/messages', {
           method: 'POST',
@@ -210,6 +416,20 @@
       if (!content) { input.focus(); return; }
       sendToInbox(content);
     });
+    $('correct-toggle').addEventListener('click', () => {
+      const form = $('correct-form');
+      form.hidden = !form.hidden;
+      if (!form.hidden && !$('correct-text').value) {
+        $('correct-text').value = currentAnswerText();
+        feedbackState.feedbackKey = uuid();
+      }
+    });
+    $('correct-submit').addEventListener('click', submitFeedback);
+    $('confirm-submit').addEventListener('click', confirmExperience);
+    $('retest-submit').addEventListener('click', retestAnswer);
+    $('verdict-pass').addEventListener('click', () => sendVerdict('pass'));
+    $('verdict-fail').addEventListener('click', () => sendVerdict('fail'));
+    $('feedback-history').addEventListener('click', showFeedbackHistory);
     input.addEventListener('keydown', event => {
       if (event.key === 'Enter' && !event.shiftKey) {
         event.preventDefault();

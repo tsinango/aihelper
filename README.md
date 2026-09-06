@@ -20,11 +20,14 @@ INBOX_WORKER_HEARTBEAT_INTERVAL_SECONDS=10
 INBOX_WORKER_HEALTHY_THRESHOLD_SECONDS=45
 ```
 
-## V2 当前状态（截至 2026-09-05）
+## V2 当前状态（截至 2026-09-06）
 
 V2 已完成 Phase 2.2 的生产闭环并正式收口，完成 Phase 3.0（收口 + 评测基线），
-并实现 Phase 3.1 Read-only Internal QA：内部工程师问答只读已确认 Knowledge。
-下一阶段是 Phase 3.2 feedback / Experience / Retest（尚未开始）。
+实现 Phase 3.1 Read-only Internal QA（内部工程师问答只读已确认 Knowledge），
+并完成 Phase 3.2 correction → Experience → retest：工程师可在 Chat 纠正答案
+（仅本次使用 / 保存为 Experience / 缺口分类），明确确认后 Experience 进入
+可信 Knowledge，复测创建新 run 并可人工判定；Inbox 增加未解决缺口筛选。
+下一阶段是 Phase 4 PDF/PPTX 主动学习（尚未开始）。
 
 ```text
 Raw Evidence

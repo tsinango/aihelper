@@ -60,6 +60,37 @@ class V2UiTest(unittest.TestCase):
         chat = (ROOT / "templates" / "chat.html").read_text()
         self.assertIn('class="active" href="/chat"', chat)
 
+    def test_chat_correction_loop_contract(self):
+        content = (ROOT / "templates" / "chat.html").read_text()
+        # Correction widgets: edit, kind, submit, explicit confirm, retest,
+        # before/after compare card, and human verdict buttons.
+        for marker in (
+            "correct-toggle", "correct-text", "correct-kind",
+            "correct-submit", "confirm-submit", "retest-submit",
+            "retest-card", "verdict-pass", "verdict-fail",
+            "feedback-history", "feedback-line",
+        ):
+            self.assertIn(marker, content)
+        for kind in (
+            "reply_only", "save_experience", "missing_information",
+            "retrieval_failure", "generation_failure",
+            "field_result_success", "field_result_failure",
+        ):
+            self.assertIn(kind, content)
+        for endpoint in (
+            "/feedback", "/confirm", "/retest", "/verdict",
+        ):
+            self.assertIn(endpoint, content)
+        # Still exactly one learning entry: forwarding material to the Inbox.
+        self.assertEqual(content.count("/api/v2/inbox/messages"), 1)
+
+    def test_inbox_gap_queue_contract(self):
+        content = (ROOT / "templates" / "inbox.html").read_text()
+        self.assertIn("gaps-toggle", content)
+        self.assertIn("drawer-title", content)
+        self.assertIn("/api/v2/feedback/unresolved", content)
+        self.assertIn("/close", content)
+
     def test_chat_is_a_read_only_internal_qa_page(self):
         content = (ROOT / "templates" / "chat.html").read_text()
         # Questions go to the answer service, never to learning ingestion.

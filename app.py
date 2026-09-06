@@ -73,6 +73,19 @@ from v2.answering import (
     answer_question,
     get_answer_run,
 )
+from v2.feedback import (
+    FeedbackConflict,
+    FeedbackNotFound,
+    close_feedback,
+    confirm_feedback,
+    count_unresolved_feedback,
+    create_feedback,
+    get_feedback,
+    list_feedback_for_run,
+    list_unresolved_feedback,
+    retest_feedback,
+    set_answer_verdict,
+)
 from v2.processing import (
     enqueue_inbox_job,
     process_inbox_job,
@@ -123,6 +136,29 @@ class V2InboxMessageIn(BaseModel):
 class V2AnswerIn(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
     context: dict | None = Field(default=None)
+
+
+class V2FeedbackIn(BaseModel):
+    feedback_kind: str = Field(min_length=1, max_length=40)
+    correction_text: str = Field(default="", max_length=13000)
+    applicability: dict | None = Field(default=None)
+    unit_kind: str = Field(default="experience", max_length=20)
+    target_knowledge_id: int | None = Field(default=None)
+    expected_revision: int | None = Field(default=None)
+    field_result: str | None = Field(default=None, max_length=20)
+    reviewer_label: str = Field(default="", max_length=200)
+
+
+class V2FeedbackConfirmIn(BaseModel):
+    confirmed_text: str | None = Field(default=None, max_length=13000)
+    applicability: dict | None = Field(default=None)
+    reviewer_label: str = Field(default="", max_length=200)
+
+
+class V2VerdictIn(BaseModel):
+    verdict: str = Field(min_length=1, max_length=10)
+    reason: str = Field(default="", max_length=2000)
+    reviewer_label: str = Field(default="", max_length=200)
 
 
 def _process_v2_inbox_job(job_id: int) -> None:
@@ -2096,6 +2132,12 @@ def _v2_answer_response(run: dict) -> dict:
         "prompt_version": run.get("prompt_version", ""),
         "llm_requests": run.get("llm_requests", 0),
         "latency_ms": run.get("latency_ms", 0),
+        "retest_of": run.get("retest_of"),
+        "feedback_id": run.get("feedback_id"),
+        "reviewer_verdict": run.get("reviewer_verdict"),
+        "reviewer_reason": run.get("reviewer_reason", ""),
+        "reviewer_label": run.get("reviewer_label", ""),
+        "reviewed_at": run.get("reviewed_at"),
         "duplicate": bool(run.get("duplicate", False)),
         "created_at": run.get("created_at"),
     }
@@ -2139,6 +2181,195 @@ def v2_get_answer(run_id: int, x_api_key: str | None = Header(None)):
         row = get_answer_run(conn, int(run_id))
     if not row:
         raise HTTPException(404, f"V2 answer run {int(run_id)} was not found")
+    return json_safe(_v2_answer_response(_run_to_dict(row)))
+
+
+def _v2_feedback_response(item: dict) -> dict:
+    return {
+        "feedback_id": item.get("id"),
+        "answer_run_id": item.get("answer_run_id"),
+        "feedback_kind": item.get("feedback_kind", ""),
+        "correction_text": item.get("correction_text", ""),
+        "applicability": item.get("applicability") or {},
+        "unit_kind": item.get("unit_kind", ""),
+        "target_knowledge_id": item.get("target_knowledge_id"),
+        "expected_revision": item.get("expected_revision"),
+        "raw_evidence_id": item.get("raw_evidence_id"),
+        "proposal_id": item.get("proposal_id"),
+        "knowledge_id": item.get("knowledge_id"),
+        "status": item.get("status", ""),
+        "field_result": item.get("field_result"),
+        "reviewer_label": item.get("reviewer_label", ""),
+        "run_question": item.get("run_question", ""),
+        "run_answer_status": item.get("run_answer_status", ""),
+        "duplicate": bool(item.get("duplicate", False)),
+        "created_at": item.get("created_at"),
+        "updated_at": item.get("updated_at"),
+    }
+
+
+@app.post("/api/v2/answers/{run_id}/feedback")
+def v2_create_feedback(
+    run_id: int,
+    payload: V2FeedbackIn,
+    x_api_key: str | None = Header(None),
+    idempotency_key: str | None = Header(default=None),
+):
+    """File an engineer correction against one answer run.
+
+    ``reply_only`` stores the edited reply for this run and never touches
+    Knowledge.  ``save_experience`` stages a provisional Experience plus a
+    pending proposal; the Experience becomes trusted only through an
+    explicit confirm.  Gap kinds only join the unresolved queue.
+    """
+
+    auth(x_api_key)
+    try:
+        with db() as conn:
+            item, duplicate = create_feedback(
+                conn,
+                answer_run_id=int(run_id),
+                idempotency_key=(idempotency_key or "").strip() or None,
+                feedback_kind=payload.feedback_kind,
+                correction_text=payload.correction_text,
+                applicability=payload.applicability,
+                unit_kind=payload.unit_kind,
+                target_knowledge_id=payload.target_knowledge_id,
+                expected_revision=payload.expected_revision,
+                field_result=payload.field_result,
+                reviewer_label=payload.reviewer_label,
+            )
+    except FeedbackNotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except FeedbackConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
+    item = dict(item)
+    item["duplicate"] = duplicate
+    return json_safe(_v2_feedback_response(item))
+
+
+@app.get("/api/v2/answers/{run_id}/feedback")
+def v2_list_run_feedback(run_id: int, x_api_key: str | None = Header(None)):
+    """Every correction ever filed against one run, newest first."""
+
+    auth(x_api_key)
+    with db() as conn:
+        items = list_feedback_for_run(conn, int(run_id))
+    return json_safe({"items": [_v2_feedback_response(item) for item in items]})
+
+
+@app.get("/api/v2/feedback/unresolved")
+def v2_unresolved_feedback(
+    limit: int = 50, x_api_key: str | None = Header(None),
+):
+    """Lightweight open-gap queue for the Inbox filter."""
+
+    auth(x_api_key)
+    with db() as conn:
+        items = list_unresolved_feedback(conn, limit=limit)
+        total = count_unresolved_feedback(conn)
+    return json_safe({
+        "items": [_v2_feedback_response(item) for item in items],
+        "total": total,
+    })
+
+
+@app.post("/api/v2/feedback/{feedback_id}/confirm")
+def v2_confirm_feedback(
+    feedback_id: int,
+    payload: V2FeedbackConfirmIn,
+    x_api_key: str | None = Header(None),
+):
+    """Explicitly confirm one Experience; idempotent, no model calls.
+
+    Repeating the confirm returns the same Knowledge instead of creating a
+    duplicate.  Updating known Knowledge checks the expected revision.
+    """
+
+    auth(x_api_key)
+    try:
+        with db() as conn:
+            knowledge, duplicate = confirm_feedback(
+                conn,
+                int(feedback_id),
+                confirmed_text=payload.confirmed_text,
+                applicability=payload.applicability,
+                reviewer_label=payload.reviewer_label,
+            )
+    except FeedbackNotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except FeedbackConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return json_safe({
+        "knowledge_id": knowledge.get("id"),
+        "trust": knowledge.get("trust", ""),
+        "unit_kind": knowledge.get("unit_kind", ""),
+        "revision": knowledge.get("revision"),
+        "duplicate": duplicate,
+    })
+
+
+@app.post("/api/v2/feedback/{feedback_id}/close")
+def v2_close_feedback(feedback_id: int, x_api_key: str | None = Header(None)):
+    """Close an open gap record without creating Knowledge."""
+
+    auth(x_api_key)
+    try:
+        with db() as conn:
+            item = close_feedback(conn, int(feedback_id))
+    except FeedbackNotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return json_safe(_v2_feedback_response(item))
+
+
+@app.post("/api/v2/feedback/{feedback_id}/retest")
+def v2_retest_feedback(
+    feedback_id: int,
+    x_api_key: str | None = Header(None),
+    idempotency_key: str | None = Header(default=None),
+):
+    """Answer the original question again from current Knowledge.
+
+    Always creates a new run linked via retest_of/feedback_id; the old run
+    keeps its snapshot and the correction text is never fed to the model.
+    """
+
+    auth(x_api_key)
+    try:
+        run = retest_feedback(
+            int(feedback_id),
+            db_factory=db,
+            llm_service=llm,
+            embedding_client=embedder,
+            idempotency_key=(idempotency_key or "").strip() or None,
+        )
+    except FeedbackNotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except (AnswerConflict, AnswerInProgress, FeedbackConflict) as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return json_safe(_v2_answer_response(run))
+
+
+@app.patch("/api/v2/answers/{run_id}/verdict")
+def v2_answer_verdict(
+    run_id: int, payload: V2VerdictIn, x_api_key: str | None = Header(None),
+):
+    """Record a human retest judgement (pass/fail); never model-written."""
+
+    auth(x_api_key)
+    try:
+        with db() as conn:
+            row = set_answer_verdict(
+                conn,
+                int(run_id),
+                verdict=payload.verdict,
+                reason=payload.reason,
+                reviewer_label=payload.reviewer_label,
+            )
+    except FeedbackNotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except FeedbackConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
     return json_safe(_v2_answer_response(_run_to_dict(row)))
 
 

@@ -19,7 +19,7 @@ The codebase is in transition between two generations:
   `/review/published`) where reviewers approve Telegram-derived support-case
   knowledge into published `verified_knowledge`. Only published knowledge may
   answer customers; historical case memory is recall/reviewer evidence only.
-- **V2** (Phases 1–3.1 implemented; Phase 3.2 not started): a new Inbox-first
+- **V2** (Phases 1–3.2 implemented): a new Inbox-first
   learning loop under `v2/` with its own `v2_`-prefixed tables, pages
   (`/inbox`, `/knowledge`, `/documents`, `/chat`) and `/api/v2/*` routes.
   Knowledge carries one of four trust values (`official_source`,
@@ -64,7 +64,10 @@ systemd, batch jobs, review workflow), `TECHNICAL_STATUS_AND_REMEDIATION.md`
   Python), `processing.py` (durable PostgreSQL-backed Inbox jobs),
   `bulk.py` (session-based bulk intake), `answering.py` (Phase 3.1 read-only
   internal QA: states, grounded drafts, citation validation, answer-run
-  persistence; never writes learning tables), `organization.py` (small local
+  persistence; never writes learning tables), `feedback.py` (Phase 3.2
+  correction loop: reply_only/save_experience/gap kinds, idempotent explicit
+  confirm with revision checks, retest-as-new-run, human verdicts; confirm
+  is pure database work with no LLM calls), `organization.py` (small local
   Entity organization; automatic LLM organization is off by default), and
   `retrieval.py` (small-corpus lexical + vector retrieval over `v2_knowledge`;
   `retrieve_for_answer()` is the separate eligibility-gated answer entry
@@ -81,6 +84,9 @@ systemd, batch jobs, review workflow), `TECHNICAL_STATUS_AND_REMEDIATION.md`
   history, and `020_v2_entity_pruning.sql` adds soft-pruning timestamps.
   `021_v2_answer_runs.sql` adds the Phase 3.1 answer-run table (idempotency
   key unique, immutable evidence snapshots).
+  `022_v2_feedback.sql` adds the Phase 3.2 correction loop (`v2_answer_feedback`,
+  Knowledge `unit_kind`/`applicability`/`revision`, proposal unit metadata,
+  run `retest_of`/`feedback_id`/human-verdict columns, `confirm` history action).
   `apply_migration.py` records SHA-256 checksums in `schema_migrations` and
   rejects changed or out-of-tree migration files.
 - Batch/offline scripts (top level): `organize_telegram_knowledge.py`
@@ -208,6 +214,9 @@ UX gate + evaluation baseline) is implemented — automatic LLM organization
 after confirmation is off by default (`V2_ORGANIZATION_LLM_ENABLED`). Phase
 3.1 (read-only internal QA: `retrieve_for_answer()`, `v2/answering.py`,
 `v2_answer_runs`, `POST/GET /api/v2/answers`, Chat QA page) is implemented;
-Phase 3.2 (feedback/Experience/Retest) is not started. There is still no
+Phase 3.2 (correction loop: `v2/feedback.py`, feedback/confirm/retest/verdict
+APIs, Chat correction UI, Inbox gap filter) is implemented; production
+acceptance evidence lives in gitignored `data/phase32_acceptance.json`.
+There is still no
 customer-answer gate: only the internal engineer draft endpoint may read
 trusted Knowledge. Before committing, also run `git diff --check`.

@@ -114,6 +114,7 @@
     </div>
     <div class="top-actions">
       <button id="history-toggle" type="button" aria-controls="thread-drawer" aria-expanded="false">历史</button>
+      <button id="gaps-toggle" type="button" aria-controls="thread-drawer" title="查看问答纠正留下的未解决缺口">缺口</button>
       <details class="key-settings" id="key-settings">
         <summary>设置 <span id="key-status" class="key-status">未设置</span></summary>
         <form class="key-panel"><label for="api-key">API Key</label><input id="api-key" type="password" autocomplete="off" placeholder="输入后保存"><button id="save-key" type="button">保存</button></form>
@@ -144,7 +145,7 @@
   <div id="drawer-backdrop" class="drawer-backdrop" hidden></div>
   <aside id="thread-drawer" class="thread-drawer" aria-label="最近对话">
     <div class="panel-heading">
-      <h2>最近对话</h2>
+      <h2 id="drawer-title">最近对话</h2>
       <button id="new-thread" type="button">＋ 新的对话</button>
       <button id="drawer-close" type="button">关闭</button>
     </div>
@@ -305,6 +306,8 @@
     }
 
     function renderThreads() {
+      const title = $('drawer-title');
+      if (title) title.textContent = '最近对话';
       const box = $('thread-list');
       if (!box) return;
       box.replaceChildren();
@@ -546,6 +549,7 @@
         updateCounts(data);
         state.threads = listFrom(data);
         renderThreads();
+        if (state.drawerMode === 'gaps') renderGaps();
       } catch (_) { /* side-panel refresh is best-effort */ }
     }
 
@@ -847,7 +851,8 @@
         if (form) form.requestSubmit ? form.requestSubmit() : form.dispatchEvent(new Event('submit', {cancelable: true}));
       }
     });
-    $('history-toggle').addEventListener('click', openDrawer);
+    $('history-toggle').addEventListener('click', () => { state.drawerMode = 'threads'; renderThreads(); openDrawer(); });
+    $('gaps-toggle').addEventListener('click', () => { state.drawerMode = 'gaps'; openDrawer(); renderGaps(); });
     $('drawer-close').addEventListener('click', closeDrawer);
     $('drawer-backdrop').addEventListener('click', closeDrawer);
     $('new-thread').addEventListener('click', startNewThread);
@@ -870,6 +875,49 @@
 
     function showError(message) { const box = $('page-error'); if (!box) return; box.textContent = message; box.hidden = false; }
     function clearError() { const box = $('page-error'); if (box) box.hidden = true; }
+
+    async function renderGaps() {
+      const title = $('drawer-title');
+      if (title) title.textContent = '未解缺口（问答纠正）';
+      const box = $('thread-list');
+      if (!box) return;
+      box.replaceChildren();
+      let items = [];
+      try {
+        const data = await api('/api/v2/feedback/unresolved?limit=50', {}, POLL_TIMEOUT_MS);
+        items = Array.isArray(data.items) ? data.items : [];
+      } catch (error) {
+        showError(error.message);
+        return;
+      }
+      if (!items.length) {
+        box.innerHTML = '<div class="empty">没有未解决的缺口。</div>';
+        return;
+      }
+      for (const item of items) {
+        const button = document.createElement('button');
+        button.className = 'thread-item';
+        button.type = 'button';
+        button.innerHTML = '<strong></strong><small></small><time></time>';
+        button.querySelector('strong').textContent = `#${value(item, 'feedback_id', 'id')} ${value(item, 'feedback_kind')}`;
+        button.querySelector('small').textContent = value(item, 'run_question') || value(item, 'correction_text');
+        button.querySelector('time').textContent = displayDate(value(item, 'updated_at', 'created_at'));
+        button.onclick = () => closeGap(item);
+        box.append(button);
+      }
+    }
+
+    async function closeGap(item) {
+      const id = value(item, 'feedback_id', 'id');
+      if (!id) return;
+      try {
+        await api(`/api/v2/feedback/${encodeURIComponent(id)}/close`, {method: 'POST'}, POLL_TIMEOUT_MS);
+        renderGaps();
+        refreshThreads();
+      } catch (error) {
+        showError(error.message);
+      }
+    }
 
     loadInbox();
   </script>

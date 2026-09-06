@@ -1307,11 +1307,11 @@ def _confirm(
                          THEN v2_knowledge.content
                          ELSE COALESCE(NULLIF(%s, ''), v2_knowledge.content)
                     END,
-                active=TRUE, updated_at=CURRENT_TIMESTAMP
+                active=TRUE, revision=revision+1, updated_at=CURRENT_TIMESTAMP
             WHERE id=%s AND active=TRUE
               AND trust IN ('official_source', 'user_confirmed', 'provisional')
             RETURNING id, title, content, entity_name, trust, active,
-                      entity_id, created_at, updated_at
+                      entity_id, revision, created_at, updated_at
             """,
             (str(proposal.get("fact_text") or "").strip(), knowledge_id),
         )

@@ -269,6 +269,7 @@ def _answer_eligible_rows(conn) -> list[dict]:
                    COALESCE(e.name, k.entity_name) AS entity_name,
                    k.entity_name AS legacy_entity_name,
                    k.trust, k.active, k.embedding, k.embedding_model,
+                   k.unit_kind, k.applicability, k.revision,
                    k.created_at, k.updated_at
             FROM v2_knowledge k
             LEFT JOIN v2_entities e ON e.id=k.entity_id
