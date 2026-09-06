@@ -478,6 +478,8 @@ def build_evidence_snapshot(candidates: list[dict], indexes: list[int]) -> list[
             "knowledge_revision": candidate.get("revision")
             if isinstance(candidate.get("revision"), int) else None,
             "knowledge_updated_at": _iso(candidate.get("updated_at")),
+            "origin_document_version_id": candidate.get("origin_document_version_id"),
+            "validation_status": candidate.get("validation_status"),
             "trust": str(candidate.get("trust") or ""),
             "unit_kind": str(candidate.get("unit_kind") or ""),
             "applicability": candidate.get("applicability") or {},
@@ -489,6 +491,16 @@ def build_evidence_snapshot(candidates: list[dict], indexes: list[int]) -> list[
             "sources": sources,
         })
     return snapshot
+
+
+def _context_version_id(context: dict) -> int | None:
+    """Explicit document version scope from the question context, if any."""
+
+    try:
+        value = (context or {}).get("document_version_id")
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _retrieval_trace(result: dict, top_k: int) -> dict:
@@ -736,8 +748,10 @@ def answer_question(
         with db_factory() as conn:
             retrieved = retrieve_for_answer(
                 conn, clean_question, embedder=embedding_client, top_k=top_k,
+                request_version_id=_context_version_id(clean_context),
             )
         outcome["retrieval_trace"] = _retrieval_trace(retrieved, top_k)
+        outcome["retrieval_trace"]["request_version_id"] = _context_version_id(clean_context)
         candidates = list(retrieved.get("candidates") or [])
         diagnostics = retrieved.get("diagnostics") or {}
         if not candidates:

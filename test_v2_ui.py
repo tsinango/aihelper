@@ -96,7 +96,8 @@ class V2UiTest(unittest.TestCase):
         for marker in (
             "learn-start", "proposals", "confirmProposal", "ordered_steps",
             "/learn", "/proposals", "/document-proposals/", "/confirm",
-            "coverage", "with_destination",
+            "coverage", "with_destination", "impact-previous",
+            "impact-compare", "impact-revalidate", "/impact",
         ):
             self.assertIn(marker, content)
 

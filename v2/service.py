@@ -530,7 +530,7 @@ def _write_knowledge_history(
     before: dict,
     after: dict,
 ) -> None:
-    if action not in {"edit", "deactivate", "restore", "move", "confirm"}:
+    if action not in {"edit", "deactivate", "restore", "move", "confirm", "revalidate"}:
         raise ValueError(f"unknown Knowledge history action: {action}")
     with conn.cursor() as cur:
         cur.execute(
@@ -581,12 +581,15 @@ def edit_knowledge(
     entity_id: int | None,
     applicability: dict | None = None,
     details_json: dict | None = None,
+    validation_status: str | None = None,
 ) -> dict:
     """Deterministically edit one Knowledge row; no LLM or embedding call.
 
-    Any content, applicability, details, or entity change bumps ``revision``
-    and records history; content/applicability/details changes also clear
-    the embedding so the stale vector can never support an answer.
+    Any content, applicability, details, entity, or validation change bumps
+    ``revision`` and records history; content/applicability/details changes
+    also clear the embedding so the stale vector can never support an
+    answer.  Validation transitions audit as ``revalidate``, other changes
+    as ``edit``/``move``.
     """
 
     clean = str(content or "").strip()
@@ -596,7 +599,13 @@ def edit_knowledge(
         raise ValueError("Knowledge applicability must be a JSON object")
     if details_json is not None and not isinstance(details_json, dict):
         raise ValueError("Knowledge details must be a JSON object")
+    if validation_status is not None and validation_status not in (
+        "pending", "validated", "needs_revalidation",
+    ):
+        raise ValueError("unknown validation status")
     current = _load_knowledge_for_maintenance(conn, int(knowledge_id))
+    if validation_status is not None and current.get("origin_document_version_id") is None:
+        raise ValueError("validation status applies to document-learned Knowledge only")
     if not current.get("active"):
         raise ValueError("deleted Knowledge must be restored before editing")
     _validate_entity_for_maintenance(conn, entity_id)
@@ -613,7 +622,11 @@ def edit_knowledge(
         and {str(key): details_json[key] for key in details_json}
         != dict(old_snapshot.get("details_json") or {})
     )
-    if not content_changed and not entity_changed and not applicability_changed and not details_changed:
+    validation_changed = (
+        validation_status is not None
+        and validation_status != old_snapshot.get("validation_status")
+    )
+    if not content_changed and not entity_changed and not applicability_changed and not details_changed and not validation_changed:
         return current
     new_applicability = (
         {str(key): applicability[key] for key in applicability}
@@ -625,12 +638,14 @@ def edit_knowledge(
         if details_json is not None
         else dict(old_snapshot.get("details_json") or {})
     )
+    new_validation = validation_status if validation_status is not None else old_snapshot.get("validation_status")
     with conn.cursor() as cur:
-        if content_changed or applicability_changed or details_changed:
+        if content_changed or applicability_changed or details_changed or validation_changed:
             cur.execute(
                 """
                 UPDATE v2_knowledge
                 SET content=%s, entity_id=%s, applicability=%s, details_json=%s,
+                    validation_status=%s,
                     embedding=NULL, embedding_model=NULL,
                     revision=revision+1, updated_at=CURRENT_TIMESTAMP
                 WHERE id=%s AND active=TRUE
@@ -639,7 +654,8 @@ def edit_knowledge(
                           origin_document_version_id, validation_status,
                           created_at, updated_at
                 """,
-                (clean, entity_id, Jsonb(new_applicability), Jsonb(new_details), int(knowledge_id)),
+                (clean, entity_id, Jsonb(new_applicability), Jsonb(new_details),
+                 new_validation, int(knowledge_id)),
             )
         else:
             cur.execute(
@@ -661,6 +677,10 @@ def edit_knowledge(
         after = _knowledge_snapshot(updated)
         after["entity_id"] = old_snapshot["entity_id"]
         _write_knowledge_history(conn, int(knowledge_id), "edit", old_snapshot, after)
+    if validation_changed:
+        after = _knowledge_snapshot(updated)
+        after["entity_id"] = old_snapshot["entity_id"]
+        _write_knowledge_history(conn, int(knowledge_id), "revalidate", old_snapshot, after)
     if entity_changed:
         before = _knowledge_snapshot(updated)
         before["entity_id"] = old_snapshot["entity_id"]

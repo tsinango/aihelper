@@ -270,7 +270,7 @@ def retrieve_learning_knowledge(conn, query: str, *, embedder=None, top_k: int =
 retrieve = retrieve_learning_knowledge
 
 
-def _answer_eligible_rows(conn) -> list[dict]:
+def _answer_eligible_rows(conn, request_version_id: int | None = None) -> list[dict]:
     """Active, trusted Knowledge backed by an accepted supports source.
 
     This is the same predicate the Phase 3.0 readiness check uses.  The
@@ -280,11 +280,24 @@ def _answer_eligible_rows(conn) -> list[dict]:
     additionally excluded: a known conflict must never silently support an
     answer draft.  Document-learned units additionally need an explicit
     validation for their own version; pre-document rows (NULL origin) keep
-    the old trust/source gate.
+    the old trust/source gate.  When the request names a document version,
+    validated units from older versions of the same lineage stay out: old
+    knowledge keeps serving old projects, never new-version questions.
     """
 
+    older_lineage: list[int] = []
+    if request_version_id is not None:
+        try:
+            from v2.documents import lineage_version_ids
+
+            lineage = lineage_version_ids(conn, int(request_version_id))
+            older_lineage = [int(item) for item in lineage[1:]]
+        except Exception:
+            older_lineage = []
+
     with conn.cursor() as cur:
-        cur.execute("""
+        cur.execute(
+            """
             SELECT k.id, k.title, k.content, k.entity_id,
                    COALESCE(e.name, k.entity_name) AS entity_name,
                    k.entity_name AS legacy_entity_name,
@@ -298,6 +311,8 @@ def _answer_eligible_rows(conn) -> list[dict]:
               AND k.trust IN ('official_source', 'user_confirmed')
               AND (k.origin_document_version_id IS NULL
                    OR k.validation_status='validated')
+              AND (k.origin_document_version_id IS NULL
+                   OR NOT (k.origin_document_version_id = ANY(%s)))
               AND EXISTS (
                     SELECT 1 FROM v2_knowledge_sources s
                     JOIN v2_raw_evidence r ON r.id=s.raw_evidence_id
@@ -315,7 +330,9 @@ def _answer_eligible_rows(conn) -> list[dict]:
                       AND c.resolution='accepted'
                   )
             ORDER BY k.id
-        """)
+        """,
+            (older_lineage,),
+        )
         return [dict(row) for row in cur.fetchall()]
 
 
@@ -374,7 +391,8 @@ def _conflict_reason(query_models: list[str], query_versions: list[str], row: di
 
 
 def retrieve_for_answer(conn, question: str, *, embedder=None, top_k: int = 5,
-                         lexical_k: int | None = None, embedding_k: int | None = None) -> dict:
+                         lexical_k: int | None = None, embedding_k: int | None = None,
+                         request_version_id: int | None = None) -> dict:
     """Independent answer retrieval with eligibility filtering before ranking.
 
     Unlike ``retrieve_learning_knowledge`` (which surfaces every active row so
@@ -404,7 +422,7 @@ def retrieve_for_answer(conn, question: str, *, embedder=None, top_k: int = 5,
     }
     if not question:
         return {"candidates": [], "diagnostics": diagnostics}
-    rows = _answer_eligible_rows(conn)
+    rows = _answer_eligible_rows(conn, request_version_id)
     # Defense in depth: the SQL gate above is authoritative (covered by the
     # PostgreSQL integration tests), but never rank a row that is not active
     # and trusted even if a future query edit lets one through.

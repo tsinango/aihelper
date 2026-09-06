@@ -90,12 +90,16 @@ from v2.documents import (
     DocumentConflict,
     DocumentError,
     DocumentNotFound,
+    affected_knowledge,
+    compare_versions,
     create_version,
     get_blocks,
     get_document_job,
     get_version,
     latest_document_job,
+    lineage_version_ids,
     list_versions,
+    record_revalidation,
     retry_document_job,
     version_coverage,
     version_file_path,
@@ -2015,11 +2019,17 @@ def v2_edit_knowledge(
     details = body.get("details_json", body.get("details"))
     if details is not None and not isinstance(details, dict):
         raise HTTPException(400, "details must be a JSON object")
+    validation_status = body.get("validation_status")
+    if validation_status is not None and validation_status not in (
+        "pending", "validated", "needs_revalidation",
+    ):
+        raise HTTPException(400, "unknown validation status")
     try:
         with db() as conn:
             return json_safe(edit_knowledge(conn, int(knowledge_id), content, entity_id,
                                             applicability=applicability,
-                                            details_json=details))
+                                            details_json=details,
+                                            validation_status=validation_status))
     except V2NotFound as exc:
         raise HTTPException(404, str(exc)) from exc
     except ValueError as exc:
@@ -2366,6 +2376,79 @@ def v2_document_coverage(version_id: int, x_api_key: str | None = Header(None)):
             raise HTTPException(404, f"V2 document version {int(version_id)} was not found")
         coverage = version_coverage(conn, int(version_id))
     return json_safe(coverage)
+
+
+@app.get("/api/v2/documents/versions/{version_id}/impact")
+def v2_document_impact(version_id: int, previous_version_id: int = Query(...),
+                       x_api_key: str | None = Header(None)):
+    """Section-level diff plus the old units citing changed areas.
+
+    Read-only: nothing is deactivated here.  Old units keep serving until
+    their own evidence fails or an engineer explicitly revalidates them.
+    """
+
+    auth(x_api_key)
+    with db() as conn:
+        version = get_version(conn, int(version_id))
+        previous = get_version(conn, int(previous_version_id))
+        if not version or not previous:
+            raise HTTPException(404, "both document versions must exist")
+        try:
+            comparison = compare_versions(conn, int(previous_version_id), int(version_id))
+        except DocumentNotFound as exc:
+            raise HTTPException(409, str(exc)) from exc
+        affected = affected_knowledge(conn, int(previous_version_id), comparison)
+    return json_safe({
+        "version_id": int(version_id),
+        "previous_version_id": int(previous_version_id),
+        "comparison": {
+            key: comparison[key]
+            for key in ("added", "changed", "removed", "unmatched", "global_scope_changed")
+        },
+        "affected_knowledge": [
+            {"knowledge_id": item["id"], "title": item.get("title", ""),
+             "trust": item.get("trust", ""),
+             "validation_status": item.get("validation_status"),
+             "revision": item.get("revision")}
+            for item in affected
+        ],
+    })
+
+
+@app.post("/api/v2/documents/versions/{version_id}/revalidate")
+def v2_revalidate_document_version(
+    version_id: int,
+    body: dict = Body(default={}),
+    x_api_key: str | None = Header(None),
+):
+    """Link a new version to its confirmed predecessor and store the diff.
+
+    Body: ``{"previous_version_id": N}``.  Old Knowledge rows are never
+    touched: reuse for the new version happens by relearning its sections
+    and confirming fresh units with the new origin.
+    """
+
+    auth(x_api_key)
+    raw_previous = (body if isinstance(body, dict) else {}).get("previous_version_id")
+    try:
+        previous_id = int(raw_previous)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(400, "previous_version_id must be an integer") from exc
+    try:
+        with db() as conn:
+            comparison = compare_versions(conn, previous_id, int(version_id))
+            affected = affected_knowledge(conn, previous_id, comparison)
+            stored = record_revalidation(conn, int(version_id), previous_id,
+                                         comparison, affected)
+    except DocumentNotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except DocumentError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return json_safe({
+        "version_id": stored.get("id"),
+        "previous_version_id": stored.get("previous_version_id"),
+        "change_summary": stored.get("change_summary") or {},
+    })
 
 
 @app.get("/api/v2/documents/versions/{version_id}/proposals")

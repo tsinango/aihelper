@@ -297,6 +297,17 @@ Knowledge 时读合格原文回答；已有草稿时做一次核对，矛盾记
 范围不冲突、块非待人工/失败；整块引用，超长章节转澄清不截断。
 回退：关闭 `check_sources` 入口即回到纯 Knowledge 问答；无关 schema 变更。
 
+## V2 文档版本重验（Phase 5.2）
+
+`GET /api/v2/documents/versions/{id}/impact?previous_version_id=N` 只读对比
+（新增/变化/删除/失配小节 + 受影响旧 Knowledge，不停用任何单元）；
+`POST .../revalidate {"previous_version_id": N}` 记录版本前驱与差异摘要。
+新版学习沿用 4.2（`/learn` + 整项确认，`origin` 指向新版）；旧单元只在其
+自身证据失效或被明确纠正时才动。带 `document_version_id` 上下文的问答会
+排除旧版链单元；`PATCH /api/v2/knowledge/{id}` 可切 `validation_status`
+（pending/validated/needs_revalidation，记 `revalidate` 历史）。
+回退：删除版本前驱关联（置空）即回到无链状态；知识行不受影响。
+
 ## 本机 Qwen 离线评测
 
 本机 Qwen3.5-2B/4B 是临时的影子评测模型，不由 systemd 托管，也不接收

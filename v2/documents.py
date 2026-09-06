@@ -974,7 +974,235 @@ __all__ = [
     "retry_document_job",
     "save_parsed_blocks",
     "storage_dir",
+    "affected_knowledge",
+    "compare_versions",
+    "lineage_version_ids",
+    "record_revalidation",
     "unfinished_document_job_ids",
     "version_coverage",
     "version_file_path",
 ]
+
+
+# -- version comparison + revalidation (Phase 5.2) ----------------------------
+
+
+GLOBAL_SECTION_KEYWORDS = (
+    "警告", "注意", "适用", "范围", "前置", "限制",
+    "warning", "caution", "scope", "applicability", "prerequisite",
+    "limitation", "requirement",
+)
+
+
+def _section_text_signature(text: str) -> str:
+    return hashlib.sha256(_normalized_section_text(text).encode("utf-8")).hexdigest()
+
+
+def _normalized_section_text(text: str) -> str:
+    import re as _re
+
+    collapsed = _re.sub(r"\s+", " ", str(text or "").casefold()).strip()
+    return collapsed
+
+
+def _is_global_section(title: str) -> bool:
+    folded = str(title or "").casefold()
+    return any(keyword in folded for keyword in GLOBAL_SECTION_KEYWORDS)
+
+
+def compare_versions(conn, old_version_id: int, new_version_id: int) -> dict:
+    """Section-level comparison between two parsed versions.
+
+    Blocks group by their top section (or slide title); page/slide numbers
+    never count as changes.  Returns added/changed/removed/unmatched section
+    lists with block references, plus whether a global scope/warning section
+    changed (which conservatively affects every dependent unit).
+    """
+
+    old_blocks = get_blocks(conn, old_version_id)
+    new_blocks = get_blocks(conn, new_version_id)
+    if not old_blocks:
+        raise DocumentNotFound(f"V2 document version {int(old_version_id)} has no blocks")
+    if not new_blocks:
+        raise DocumentNotFound(f"V2 document version {int(new_version_id)} has no blocks")
+
+    def sections(blocks: list[dict]) -> dict[str, list[dict]]:
+        # Full heading path: a changed subsection must not lump the whole
+        # chapter, and page/slide numbers never participate.
+        grouped: dict[str, list[dict]] = {}
+        for block in blocks:
+            path = list(block.get("section_path") or [])
+            title = " / ".join(str(part) for part in path if str(part).strip())
+            grouped.setdefault(title or "Untitled", []).append(block)
+        return grouped
+
+    old_sections = sections(old_blocks)
+    new_sections = sections(new_blocks)
+    added, changed, removed, unmatched = [], [], [], []
+    for title, blocks in sorted(new_sections.items()):
+        if title not in old_sections:
+            added.append(_section_view(title, blocks))
+            continue
+        old_sig = _section_text_signature(
+            "\n".join(str(block.get("evidence_text") or "") for block in old_sections[title]))
+        new_sig = _section_text_signature(
+            "\n".join(str(block.get("evidence_text") or "") for block in blocks))
+        if old_sig != new_sig:
+            changed.append(_section_view(title, blocks))
+    for title, blocks in sorted(old_sections.items()):
+        if title not in new_sections:
+            removed.append(_section_view(title, blocks))
+        elif not any(
+            str(block.get("evidence_text") or "").strip()
+            for block in new_sections[title]
+        ) and any(
+            str(block.get("evidence_text") or "").strip() for block in blocks
+        ):
+            unmatched.append(_section_view(title, blocks))
+    global_changed = any(
+        _is_global_section(item["section"])
+        for item in changed
+    )
+    return {
+        "old_version_id": int(old_version_id),
+        "new_version_id": int(new_version_id),
+        "added": added,
+        "changed": changed,
+        "removed": removed,
+        "unmatched": unmatched,
+        "global_scope_changed": global_changed,
+    }
+
+
+def _section_view(title: str, blocks: list[dict]) -> dict:
+    return {
+        "section": title,
+        "global": _is_global_section(title),
+        "blocks": [
+            {
+                "block_id": int(block["id"]),
+                "block_key": str(block.get("block_key") or ""),
+                "page_no": block.get("page_no"),
+                "slide_no": block.get("slide_no"),
+                "block_type": str(block.get("block_type") or ""),
+            }
+            for block in blocks
+        ],
+    }
+
+
+def affected_knowledge(conn, old_version_id: int, comparison: dict) -> list[dict]:
+    """Knowledge rows of the old version whose evidence sits in changed areas.
+
+    A changed global scope/warning section conservatively affects every unit
+    derived from the old version.  Otherwise only units citing blocks of
+    added/changed/removed/unmatched sections are listed.  Read-only: nothing
+    is deactivated here.
+    """
+
+    sections = {
+        item["section"]
+        for group in ("changed", "removed", "unmatched")
+        for item in comparison.get(group, [])
+    }
+    with conn.cursor() as cur:
+        if comparison.get("global_scope_changed"):
+            cur.execute(
+                """
+                SELECT k.id, k.title, k.trust, k.validation_status, k.revision
+                FROM v2_knowledge k
+                WHERE k.origin_document_version_id=%s AND k.active=TRUE
+                ORDER BY k.id
+                """,
+                (int(old_version_id),),
+            )
+            return [dict(row) for row in cur.fetchall()]
+        if not sections:
+            return []
+        cur.execute(
+            """
+            SELECT DISTINCT k.id, k.title, k.trust, k.validation_status, k.revision
+            FROM v2_knowledge k
+            JOIN v2_knowledge_sources s ON s.knowledge_id=k.id
+            JOIN v2_raw_evidence r ON r.id=s.raw_evidence_id
+            JOIN v2_document_blocks b ON b.raw_evidence_id=r.id
+            WHERE k.origin_document_version_id=%s
+              AND k.active=TRUE
+              AND s.active=TRUE AND s.relation='supports'
+              AND b.version_id=%s
+              AND array_to_string(b.section_path, ' / ') = ANY(%s)
+            ORDER BY k.id
+            """,
+            (int(old_version_id), int(old_version_id), sorted(sections)),
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+
+def lineage_version_ids(conn, version_id: int) -> list[int]:
+    """The version plus its confirmed predecessors, newest first."""
+
+    chain = []
+    seen = set()
+    current: int | None = int(version_id)
+    with conn.cursor() as cur:
+        while current is not None and current not in seen:
+            seen.add(current)
+            chain.append(current)
+            cur.execute(
+                "SELECT previous_version_id FROM v2_document_versions WHERE id=%s",
+                (current,),
+            )
+            row = cur.fetchone()
+            current = int(row["previous_version_id"]) if row and row.get("previous_version_id") else None
+    return chain
+
+
+def record_revalidation(conn, new_version_id: int, previous_version_id: int,
+                         comparison: dict, affected: list[dict]) -> dict:
+    """Link the new version to its predecessor and store the comparison.
+
+    Old units are never touched here: they keep serving until their own
+    evidence fails or an engineer explicitly revalidates them.
+    """
+
+    if int(new_version_id) == int(previous_version_id):
+        raise DocumentError("a version cannot revalidate itself")
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, document_key FROM v2_document_versions WHERE id=%s",
+            (int(previous_version_id),),
+        )
+        previous = cur.fetchone()
+        cur.execute(
+            "SELECT id, document_key FROM v2_document_versions WHERE id=%s",
+            (int(new_version_id),),
+        )
+        current = cur.fetchone()
+    if not previous or not current:
+        raise DocumentNotFound("both versions must exist for revalidation")
+    if str(previous["document_key"] or "") != str(current["document_key"] or ""):
+        raise DocumentError("revalidation links versions of the same document_key only")
+    summary = {
+        "previous_version_id": int(previous_version_id),
+        "added": [item["section"] for item in comparison.get("added", [])],
+        "changed": [item["section"] for item in comparison.get("changed", [])],
+        "removed": [item["section"] for item in comparison.get("removed", [])],
+        "unmatched": [item["section"] for item in comparison.get("unmatched", [])],
+        "global_scope_changed": bool(comparison.get("global_scope_changed")),
+        "affected_knowledge_ids": [int(item["id"]) for item in affected],
+    }
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE v2_document_versions
+            SET previous_version_id=%s, change_summary=%s,
+                updated_at=CURRENT_TIMESTAMP
+            WHERE id=%s
+            RETURNING id, document_key, version_label, previous_version_id,
+                      change_summary, status
+            """,
+            (int(previous_version_id), Jsonb(summary), int(new_version_id)),
+        )
+        row = cur.fetchone()
+    assert row is not None
+    return dict(row)
