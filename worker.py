@@ -18,6 +18,8 @@ from embeddings import (
 )
 from llm import OPENROUTER_DEFAULT_MODEL, OpenRouterLLM
 from v2.processing import process_inbox_job, recover_inbox_jobs
+from v2.documents import claim_document_job
+from v2.document_processing import process_document_job, recover_document_jobs
 from v2.service import (
     INBOX_WORKER_HEARTBEAT_INTERVAL_SECONDS,
     INBOX_WORKER_NAME,
@@ -50,6 +52,7 @@ def main() -> None:
     token = os.getenv("OPENROUTER_API_KEY", "").strip() or read_openrouter_token(token_file)
     timeout = float(os.getenv("OPENROUTER_TIMEOUT_SECONDS", "120"))
     question_budget = int(os.getenv("V2_PASSIVE_QUESTION_BUDGET", "5"))
+    document_dir = Path(os.getenv("DOCUMENT_DIR", "data/documents"))
 
     embedder = None
     llm = None
@@ -80,6 +83,12 @@ def main() -> None:
             question_budget=question_budget,
         )
 
+    def run_document_job(job_id: int) -> None:
+        # Phase 4.1 document steps are local parse work: no LLM needed, and
+        # one job finishes one version step without holding worker capacity
+        # across network calls.
+        process_document_job(int(job_id), db_factory=db, base_dir=document_dir)
+
     stop_event = threading.Event()
     heartbeat = threading.Thread(
         target=_heartbeat_loop,
@@ -90,14 +99,23 @@ def main() -> None:
     heartbeat.start()
     try:
         # Requeue jobs left in processing by a worker or host restart before
-        # entering the normal FIFO polling loop.
+        # entering the normal FIFO polling loop.  Inbox always wins: a
+        # document job runs only when no Inbox job is waiting, so one manual
+        # can never starve interactive learning.
         recover_inbox_jobs(db_factory=db, process_job=run_job)
+        recover_document_jobs(db_factory=db, process_job=run_document_job)
         while True:
             try:
                 with db() as conn:
                     job_ids = list_queued_job_ids(conn, limit=1)
                 if job_ids:
                     run_job(job_ids[0])
+                    continue
+                with db() as conn:
+                    document_job = claim_document_job(conn, ("parse",))
+                    conn.commit()
+                if document_job:
+                    run_document_job(int(document_job["id"]))
                 else:
                     time.sleep(1)
             except Exception:

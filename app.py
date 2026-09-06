@@ -15,7 +15,7 @@ from pathlib import Path
 
 import httpx
 import psycopg
-from fastapi import BackgroundTasks, Body, FastAPI, File, Header, HTTPException, Query, UploadFile
+from fastapi import BackgroundTasks, Body, FastAPI, File, Form, Header, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 from psycopg.rows import dict_row
@@ -85,6 +85,19 @@ from v2.feedback import (
     list_unresolved_feedback,
     retest_feedback,
     set_answer_verdict,
+)
+from v2.documents import (
+    DocumentConflict,
+    DocumentError,
+    DocumentNotFound,
+    create_version,
+    get_blocks,
+    get_document_job,
+    get_version,
+    latest_document_job,
+    list_versions,
+    retry_document_job,
+    version_file_path,
 )
 from v2.processing import (
     enqueue_inbox_job,
@@ -981,13 +994,17 @@ def ready():
                        to_regclass('public.v2_inbox_workers') AS workers,
                        to_regclass('public.v2_entities') AS entities,
                        to_regclass('public.v2_entity_relations') AS entity_relations,
-                       to_regclass('public.v2_knowledge_history') AS knowledge_history
+                       to_regclass('public.v2_knowledge_history') AS knowledge_history,
+                       to_regclass('public.v2_document_versions') AS document_versions,
+                       to_regclass('public.v2_document_blocks') AS document_blocks,
+                       to_regclass('public.v2_document_jobs') AS document_jobs
                 """
             )
             schema = cur.fetchone()
             if not schema or not all(schema.get(name) for name in (
                 "questions", "v2_knowledge", "jobs", "workers", "entities", "entity_relations",
-                "knowledge_history",
+                "knowledge_history", "document_versions", "document_blocks",
+                "document_jobs",
             )):
                 return _ready_failure("schema_unavailable")
             worker = worker_health(conn)
@@ -2090,7 +2107,183 @@ def v2_documents(x_api_key: str | None = Header(None)):
     auth(x_api_key)
     with db() as conn:
         items = list_documents(conn)
-    return json_safe({"items": items, "total": len(items)})
+        versions = [_v2_document_version_view(item) for item in list_versions(conn)]
+    return json_safe({"items": items, "total": len(items), "versions": versions})
+
+
+def _v2_document_version_view(version: dict) -> dict:
+    return {
+        "version_id": version.get("id"),
+        "document_key": version.get("document_key", ""),
+        "version_label": version.get("version_label", ""),
+        "sha256": version.get("sha256", ""),
+        "file_name": version.get("file_name", ""),
+        "file_type": version.get("file_type", ""),
+        "file_size": version.get("file_size", 0),
+        "title": version.get("title", ""),
+        "applicability": version.get("applicability") or {},
+        "source_authenticity": version.get("source_authenticity", ""),
+        "parser_version": version.get("parser_version", ""),
+        "status": version.get("status", ""),
+        "block_count": version.get("block_count", 0),
+        "created_at": version.get("created_at"),
+        "updated_at": version.get("updated_at"),
+    }
+
+
+@app.post("/api/v2/documents")
+async def v2_upload_document(
+    file: UploadFile = File(...),
+    document_key: str = Form(""),
+    version_label: str = Form(""),
+    title: str = Form(""),
+    applicability: str = Form(""),
+    source_authenticity: str = Form("unverified"),
+    x_api_key: str | None = Header(None),
+):
+    """Upload one PDF/PPTX as an immutable version and queue its parse job.
+
+    The stored filename is service-generated from the content hash; the
+    original name is display-only.  Parsing runs in the single worker, so
+    the version starts as ``uploaded`` and becomes ``parsed`` asynchronously.
+    """
+
+    auth(x_api_key)
+    from v2.documents import MAX_UPLOAD_BYTES
+
+    content = await file.read(MAX_UPLOAD_BYTES + 2)
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(400, "uploaded file exceeds the size limit")
+    try:
+        with db() as conn:
+            version, created = create_version(
+                conn,
+                base_dir=settings["document_dir"],
+                document_key=document_key,
+                version_label=version_label or None,
+                filename=file.filename or "",
+                content=content,
+                title=title,
+                applicability=applicability,
+                source_authenticity=(source_authenticity or "unverified").strip(),
+            )
+            job_id = None
+            if created:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT id FROM v2_document_jobs WHERE idempotency_key=%s",
+                        (f"v2doc:parse:{int(version['id'])}",),
+                    )
+                    found = cur.fetchone()
+                    job_id = int(found["id"]) if found else None
+    except DocumentError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except DocumentConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
+    view = _v2_document_version_view(version)
+    view["created"] = created
+    view["parse_job_id"] = job_id
+    return json_safe(view)
+
+
+def _v2_document_block_view(block: dict) -> dict:
+    return {
+        "block_id": block.get("id"),
+        "block_key": block.get("block_key", ""),
+        "ord": block.get("ord", 0),
+        "section_path": block.get("section_path") or [],
+        "page_no": block.get("page_no"),
+        "slide_no": block.get("slide_no"),
+        "block_type": block.get("block_type", ""),
+        "raw_evidence_id": block.get("raw_evidence_id"),
+        "evidence_text": block.get("evidence_text") or "",
+        "content_hash": block.get("content_hash", ""),
+        "layout": block.get("layout") or {},
+        "assets": block.get("assets") or [],
+        "processing_state": block.get("processing_state", ""),
+        "state_reason": block.get("state_reason", ""),
+    }
+
+
+@app.get("/api/v2/documents/versions/{version_id}")
+def v2_document_version(version_id: int, x_api_key: str | None = Header(None)):
+    auth(x_api_key)
+    with db() as conn:
+        version = get_version(conn, int(version_id))
+    if not version:
+        raise HTTPException(404, f"V2 document version {int(version_id)} was not found")
+    return json_safe(_v2_document_version_view(version))
+
+
+@app.get("/api/v2/documents/versions/{version_id}/file")
+def v2_document_file(version_id: int, x_api_key: str | None = Header(None)):
+    from v2.documents import MIME_TYPES
+
+    auth(x_api_key)
+    with db() as conn:
+        version = get_version(conn, int(version_id))
+    if not version:
+        raise HTTPException(404, f"V2 document version {int(version_id)} was not found")
+    try:
+        path = version_file_path(settings["document_dir"], version)
+    except DocumentNotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+    media_type = MIME_TYPES.get(str(version.get("file_type") or ""), "application/octet-stream")
+    return FileResponse(path, filename=str(version.get("file_name") or f"v2-{version_id}"),
+                        media_type=media_type)
+
+
+@app.get("/api/v2/documents/versions/{version_id}/blocks")
+def v2_document_blocks(version_id: int, x_api_key: str | None = Header(None)):
+    auth(x_api_key)
+    with db() as conn:
+        version = get_version(conn, int(version_id))
+        if not version:
+            raise HTTPException(404, f"V2 document version {int(version_id)} was not found")
+        blocks = get_blocks(conn, int(version_id))
+        job = latest_document_job(conn, int(version_id), "parse")
+    view = {
+        "version": _v2_document_version_view(version),
+        "items": [_v2_document_block_view(block) for block in blocks],
+        "total": len(blocks),
+        "parse_job": (
+            {"job_id": job.get("id"), "status": job.get("status", ""),
+             "error": job.get("error", ""),
+             "result_summary": job.get("result_summary") or {}}
+            if job else None
+        ),
+    }
+    return json_safe(view)
+
+
+@app.get("/api/v2/document-jobs/{job_id}")
+def v2_document_job(job_id: int, x_api_key: str | None = Header(None)):
+    auth(x_api_key)
+    with db() as conn:
+        job = get_document_job(conn, int(job_id))
+    if not job:
+        raise HTTPException(404, f"V2 document job {int(job_id)} was not found")
+    return json_safe({
+        "job_id": job.get("id"),
+        "version_id": job.get("version_id"),
+        "stage": job.get("stage", ""),
+        "status": job.get("status", ""),
+        "attempts": job.get("attempts", 0),
+        "result_summary": job.get("result_summary") or {},
+        "error": job.get("error", ""),
+        "created_at": job.get("created_at"),
+        "updated_at": job.get("updated_at"),
+    })
+
+
+@app.post("/api/v2/document-jobs/{job_id}/retry")
+def v2_retry_document_job(job_id: int, x_api_key: str | None = Header(None)):
+    auth(x_api_key)
+    with db() as conn:
+        job = retry_document_job(conn, int(job_id))
+    if not job:
+        raise HTTPException(404, f"V2 document job {int(job_id)} was not found")
+    return json_safe({"job_id": job.get("id"), "status": job.get("status", "")})
 
 
 @app.get("/api/v2/chat")

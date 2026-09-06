@@ -27,7 +27,11 @@ V2 已完成 Phase 2.2 的生产闭环并正式收口，完成 Phase 3.0（收�
 并完成 Phase 3.2 correction → Experience → retest：工程师可在 Chat 纠正答案
 （仅本次使用 / 保存为 Experience / 缺口分类），明确确认后 Experience 进入
 可信 Knowledge，复测创建新 run 并可人工判定；Inbox 增加未解决缺口筛选。
-下一阶段是 Phase 4 PDF/PPTX 主动学习（尚未开始）。
+Phase 4.1 已实现结构化 PDF/PPTX 接入：文件版本不可覆盖，页/幻灯片/表格/
+图片/备注进入结构块并在 Documents 页可检查，图片页明确标待人工，解析在
+单个 worker 的 inbox 空闲分支执行。文档单元暂不进入回答（Phase 4.2 接入
+提炼与确认后才可回答）。
+下一阶段是 Phase 4.2 完整文档 Knowledge Unit（尚未开始）。
 
 ```text
 Raw Evidence

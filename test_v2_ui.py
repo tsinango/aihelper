@@ -91,6 +91,19 @@ class V2UiTest(unittest.TestCase):
         self.assertIn("/api/v2/feedback/unresolved", content)
         self.assertIn("/close", content)
 
+    def test_documents_upload_and_structure_contract(self):
+        content = (ROOT / "templates" / "documents.html").read_text()
+        for marker in (
+            "doc-key", "doc-label", "doc-title", "doc-auth",
+            "upload-status", "versions", "version-detail", "blocks",
+            "parse_job", "download", "job-retry",
+        ):
+            self.assertIn(marker, content)
+        self.assertIn("/api/v2/documents", content)
+        self.assertIn("/api/v2/document-jobs/", content)
+        # Legacy read-only table stays on the page.
+        self.assertIn("没有找到资料", content)
+
     def test_chat_is_a_read_only_internal_qa_page(self):
         content = (ROOT / "templates" / "chat.html").read_text()
         # Questions go to the answer service, never to learning ingestion.

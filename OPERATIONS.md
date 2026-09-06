@@ -247,6 +247,22 @@ Chat 回答卡新增纠正入口：`POST /api/v2/answers/{id}/feedback`
 已确认的 Experience 与历史记录保留，不删除。迁移 022 只加表/加列，
 无回填，不阻塞旧版本代码读取（新列均有 DEFAULT）。
 
+## V2 文档接入（Phase 4.1）
+
+`POST /api/v2/documents`（multipart：`file` + `document_key` 必填，
+`version_label` 默认为文件名，`title`/`applicability`/`source_authenticity`
+可选）上传 PDF/PPTX；同 key+label+相同字节幂等返回已存版本，不同字节
+409。文件按内容 hash 存于 `data/documents/v2/`，原文件名仅展示。限制：
+单文件 50MB、PDF 500 页、PPTX 500 页、图片资源 100MB/版本；
+超限 400，魔法字节校验失败 400。解析为后台任务（`v2_document_jobs`），
+单个 worker 在 Inbox 空闲时执行，`GET /api/v2/document-jobs/{id}` 轮询，
+失败可 `POST .../retry`（瞬时错误退避重试，最多 5 次后转 failed 并标版本
+`parse_failed`）。Documents 页可查看版本、结构块（含待人工原因）与下载
+原文（PPTX 返回正确 MIME）。
+
+回退：停用上传入口及 worker 文档分支，Phase 3 与旧 Inbox 不受影响；
+保留文件、块、来源。图片页/未知图表只标 `needs_review`，不进入回答。
+
 ## 本机 Qwen 离线评测
 
 本机 Qwen3.5-2B/4B 是临时的影子评测模型，不由 systemd 托管，也不接收

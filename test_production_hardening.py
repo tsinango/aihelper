@@ -54,6 +54,9 @@ class ProductionHardeningTest(unittest.TestCase):
             "workers": "workers", "entities": "v2_entities",
             "entity_relations": "v2_entity_relations",
             "knowledge_history": "v2_knowledge_history",
+            "document_versions": "v2_document_versions",
+            "document_blocks": "v2_document_blocks",
+            "document_jobs": "v2_document_jobs",
         }
         with patch("app.db", return_value=_ConnectionContext(row=schema)), patch(
             "app.worker_health", return_value={"worker_name": "aihelper-inbox-worker", "healthy": False}
